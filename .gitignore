@@ -1,0 +1,6 @@
+/node_modules/
+/dist/
+/.handoff-index*
+/__pycache__/
+**/__pycache__/
+*.pyc

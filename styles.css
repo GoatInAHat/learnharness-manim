@@ -1,0 +1,13 @@
+.lh-manim { display: grid; gap: 0.8rem; max-width: 48rem; margin: 1.5rem auto; padding: 0 1rem; }
+.lh-manim p, .lh-manim ul { margin: 0; }
+.lh-manim-panel, .lh-manim details { display: grid; gap: 0.75rem; padding: 1rem; border: 1px solid var(--border); border-radius: 0.6rem; }
+.lh-manim details > :not(summary) { margin-block-start: 0.7rem; }
+.lh-manim label { display: grid; gap: 0.35rem; }
+.lh-manim label:has(input[type=checkbox]) { display: flex; flex-direction: row-reverse; justify-content: start; align-items: center; }
+.lh-manim textarea, .lh-manim select { width: 100%; background: var(--background); color: var(--foreground); border: 1px solid var(--border); border-radius: 0.35rem; padding: 0.4rem; }
+.lh-manim textarea { resize: vertical; }
+.lh-manim button { justify-self: start; padding: 0.35rem 0.7rem; border: 1px solid var(--border); border-radius: 0.35rem; }
+.lh-manim button:disabled { opacity: 0.5; }
+.lh-manim li button { margin: 0.3rem 0 0.3rem 0.55rem; }
+.lh-manim video { width: 100%; }
+.lh-manim [hidden] { display: none; }

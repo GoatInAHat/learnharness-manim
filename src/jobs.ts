@@ -1,0 +1,151 @@
+import { randomUUID } from 'node:crypto';
+import { appendFile, lstat, mkdtemp, open, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { CHUNK_BYTES, PLAN_BYTES, VIDEO_BYTES, WAV_BYTES } from './protocol';
+import type { JobView } from './protocol';
+import { privateDirectory, Runtime } from './runtime';
+
+const lifetime = 30 * 60 * 1000;
+const renderTime = 12 * 60 * 1000;
+
+export function object(raw: unknown) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Expected an object.');
+  return raw as Record<string, unknown>;
+}
+
+export function text(raw: unknown, max: number) {
+  if (typeof raw !== 'string' || !raw.trim() || Buffer.byteLength(raw, 'utf8') > max) throw new Error('Text is empty or exceeds its allowed size.');
+  return raw;
+}
+
+export function integer(raw: unknown, max: number) {
+  if (typeof raw !== 'number' || !Number.isSafeInteger(raw) || raw < 0 || raw > max) throw new Error('Number is outside its allowed range.');
+  return raw;
+}
+
+interface Job extends JobView {
+  folder: string;
+  timer: ReturnType<typeof setTimeout>;
+  audioSize: number;
+  writing: boolean;
+  abort: AbortController;
+  work?: Promise<void>;
+}
+
+export class Jobs {
+  private readonly jobs = new Map<string, Job>();
+  private starting = 0;
+
+  constructor(private readonly root: string, private readonly runtime: Runtime, private readonly signal: AbortSignal) {}
+
+  list(): JobView[] {
+    return [...this.jobs.values()].map(({ id, state, size, error }) => ({ id, state, size, error })).reverse();
+  }
+
+  private find(id: unknown) {
+    const job = typeof id === 'string' ? this.jobs.get(id) : undefined;
+    if (!job) throw new Error('This render job has expired or was removed.');
+    return job;
+  }
+
+  async create(plan: unknown) {
+    const input = text(plan, PLAN_BYTES);
+    if (this.jobs.size + this.starting >= 5) throw new Error('Delete an earlier render before starting another job.');
+    this.starting++;
+    let folder: string | undefined;
+    try {
+      this.signal.throwIfAborted();
+      if (!await this.runtime.ready()) throw new Error('Install the pinned runtime before importing a plan.');
+      folder = await mkdtemp(join(await privateDirectory(this.root), 'render-'));
+      await writeFile(join(folder, 'plan.json'), input, { mode: 0o600 });
+      await this.runtime.validate(folder, AbortSignal.any([this.signal, AbortSignal.timeout(15_000)]));
+      this.signal.throwIfAborted();
+      const id = randomUUID();
+      const timer = setTimeout(() => { void this.remove(id).catch(() => undefined); }, lifetime);
+      timer.unref();
+      this.jobs.set(id, { id, state: 'upload', folder, timer, abort: new AbortController(), audioSize: 0, writing: false });
+      folder = undefined;
+      return id;
+    } finally {
+      this.starting--;
+      if (folder) await rm(folder, { recursive: true, force: true });
+    }
+  }
+
+  async upload(id: unknown, offset: unknown, raw: unknown) {
+    const job = this.find(id);
+    if (job.state !== 'upload' || job.writing || integer(offset, WAV_BYTES) !== job.audioSize) throw new Error('Audio upload is out of sequence.');
+    const encoded = text(raw, CHUNK_BYTES * 4 / 3);
+    const bytes = Buffer.from(encoded, 'base64');
+    if (!bytes.length || bytes.toString('base64') !== encoded || bytes.length > CHUNK_BYTES || job.audioSize + bytes.length > WAV_BYTES) {
+      throw new Error('Invalid audio chunk or WAV exceeds 12 MiB.');
+    }
+    this.signal.throwIfAborted();
+    job.writing = true;
+    try {
+      await appendFile(join(job.folder, 'narration.wav'), bytes, { mode: 0o600 });
+      job.audioSize += bytes.length;
+    } catch (error) {
+      job.state = 'failed';
+      job.error = 'Could not store the narration chunk.';
+      throw error;
+    } finally {
+      job.writing = false;
+    }
+  }
+
+  start(id: unknown) {
+    const job = this.find(id);
+    if (job.state !== 'upload' || job.writing) throw new Error('The job is already running or its audio is still uploading.');
+    if ([...this.jobs.values()].some(({ state }) => state === 'rendering')) throw new Error('One render can run at a time.');
+    this.signal.throwIfAborted();
+    job.state = 'rendering';
+    const timeout = AbortSignal.timeout(renderTime);
+    const signal = AbortSignal.any([this.signal, job.abort.signal, timeout]);
+    job.work = (async () => {
+      try {
+        await this.runtime.render(job.folder, signal);
+        const video = await lstat(join(job.folder, 'video.mp4'));
+        if (!video.isFile() || video.size <= 0 || video.size > VIDEO_BYTES) throw new Error('Rendered video exceeds the 96 MiB preview limit.');
+        signal.throwIfAborted();
+        job.size = video.size;
+        job.state = 'ready';
+      } catch (error) {
+        job.state = job.abort.signal.aborted ? 'cancelled' : 'failed';
+        job.error = timeout.aborted ? 'Render exceeded 12 minutes.' : job.state === 'failed' ? (error as Error).message : undefined;
+      } finally {
+        // The video is the only artefact retained until deletion or expiry.
+        await Promise.allSettled(['media', 'plan.json', 'narration.wav', ...(job.state === 'ready' ? [] : ['video.mp4'])]
+          .map((path) => rm(join(job.folder, path), { recursive: true, force: true })));
+      }
+    })();
+  }
+
+  async chunk(id: unknown, value: unknown) {
+    const job = this.find(id);
+    if (job.state !== 'ready' || !job.size) throw new Error('Video is still unavailable.');
+    const offset = integer(value, job.size - 1);
+    const file = await open(join(job.folder, 'video.mp4'), 'r');
+    try {
+      const buffer = Buffer.alloc(Math.min(CHUNK_BYTES, job.size - offset));
+      const { bytesRead } = await file.read(buffer, 0, buffer.length, offset);
+      if (bytesRead !== buffer.length) throw new Error('The temporary video was truncated.');
+      return buffer.toString('base64');
+    } finally {
+      await file.close();
+    }
+  }
+
+  async remove(id: unknown) {
+    const job = this.find(id);
+    this.jobs.delete(job.id);
+    clearTimeout(job.timer);
+    job.abort.abort(new Error('Render cancelled.'));
+    await job.work;
+    await rm(job.folder, { recursive: true, force: true });
+  }
+
+  async dispose() {
+    await Promise.allSettled([...this.jobs.keys()].map((id) => this.remove(id)));
+  }
+}

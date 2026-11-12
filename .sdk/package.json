@@ -1,0 +1,17 @@
+{
+	"name": "learnharness-plugin-api",
+	"version": "1.0.0",
+	"private": true,
+	"type": "module",
+	"types": "./index.d.ts",
+	"exports": {
+		".": {
+			"types": "./index.d.ts"
+		}
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-agent-core": "1.4.0",
+		"@earendil-works/pi-ai": "1.4.0",
+		"typebox": "^1.3.27"
+	}
+}

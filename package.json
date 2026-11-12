@@ -1,0 +1,22 @@
+{
+  "name": "learnharness-manim",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test scripts/*.test.mjs",
+    "cli": "node dist/cli.cjs"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "1.4.0",
+    "@earendil-works/pi-ai": "1.4.0",
+    "@types/node": "22.19.15",
+    "esbuild": "0.28.0",
+    "learnharness-plugin-api": "file:./.sdk",
+    "typebox": "1.3.27",
+    "typescript": "6.0.3"
+  }
+}

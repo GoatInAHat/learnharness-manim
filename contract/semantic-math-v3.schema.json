@@ -1,0 +1,104 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Shared semantic math scene v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "title", "durationSeconds", "graph", "beats"],
+  "properties": {
+    "version": { "const": 3 },
+    "title": { "type": "string", "minLength": 1, "maxLength": 72 },
+    "durationSeconds": { "type": "integer", "minimum": 90, "maximum": 120 },
+    "graph": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["domain", "variable", "functionName", "xLabel", "yLabel", "expression"],
+      "properties": {
+        "domain": {
+          "type": "array", "minItems": 2, "maxItems": 2,
+          "items": { "$ref": "#/definitions/coordinate" }
+        },
+        "variable": { "type": "string", "pattern": "^[a-z]$" },
+        "functionName": { "type": "string", "pattern": "^[a-z]$" },
+        "xLabel": { "type": "string", "minLength": 1, "maxLength": 28 },
+        "yLabel": { "type": "string", "minLength": 1, "maxLength": 28 },
+        "slopeUnit": { "type": "string", "minLength": 1, "maxLength": 14 },
+        "expression": { "$ref": "#/definitions/expression" }
+      }
+    },
+    "beats": {
+      "type": "array", "minItems": 5, "maxItems": 8,
+      "items": { "$ref": "#/definitions/beat" }
+    }
+  },
+  "definitions": {
+    "coordinate": { "type": "number", "minimum": -1000, "maximum": 1000 },
+    "frame": { "type": "integer", "minimum": 0, "maximum": 3599 },
+    "expression": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false, "required": ["op", "value"],
+          "properties": { "op": { "const": "constant" }, "value": { "$ref": "#/definitions/coordinate" } }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["op"],
+          "properties": { "op": { "const": "x" } }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["op", "left", "right"],
+          "properties": {
+            "op": { "enum": ["add", "subtract", "multiply"] },
+            "left": { "$ref": "#/definitions/expression" },
+            "right": { "$ref": "#/definitions/expression" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["op", "base", "exponent"],
+          "properties": {
+            "op": { "const": "power" }, "base": { "$ref": "#/definitions/expression" },
+            "exponent": { "type": "integer", "minimum": 1, "maximum": 5 }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["op", "input", "steepness"],
+          "properties": {
+            "op": { "const": "smooth" }, "input": { "$ref": "#/definitions/expression" },
+            "steepness": { "type": "number", "minimum": 1, "maximum": 16 }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["op", "at", "before", "after"],
+          "properties": {
+            "op": { "const": "piecewise" }, "at": { "$ref": "#/definitions/coordinate" },
+            "before": { "$ref": "#/definitions/expression" },
+            "after": { "$ref": "#/definitions/expression" }
+          }
+        }
+      ]
+    },
+    "camera": {
+      "type": "object", "additionalProperties": false, "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": { "$ref": "#/definitions/coordinate" },
+        "y": { "$ref": "#/definitions/coordinate" },
+        "width": { "type": "number", "minimum": 0.02, "maximum": 2000 },
+        "height": { "type": "number", "minimum": 0.02, "maximum": 2000 }
+      }
+    },
+    "beat": {
+      "type": "object", "additionalProperties": false,
+      "required": ["startFrame", "settleFrame", "cueFrame", "a", "h", "camera", "display", "narration"],
+      "properties": {
+        "startFrame": { "$ref": "#/definitions/frame" },
+        "settleFrame": { "$ref": "#/definitions/frame" },
+        "cueFrame": { "$ref": "#/definitions/frame" },
+        "a": { "$ref": "#/definitions/coordinate" },
+        "h": { "$ref": "#/definitions/coordinate" },
+        "camera": { "$ref": "#/definitions/camera" },
+        "display": { "enum": ["function", "points", "difference", "secant", "limit", "tangent", "compare"] },
+        "reference": { "$ref": "#/definitions/coordinate" },
+        "narration": { "type": "string", "minLength": 1, "maxLength": 340 },
+        "caption": { "type": "string", "minLength": 1, "maxLength": 105 }
+      }
+    }
+  }
+}
