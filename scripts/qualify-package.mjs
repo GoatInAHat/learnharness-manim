@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { lstat, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve, sep } from 'node:path';
@@ -8,6 +9,7 @@ import { packageFiles, pluginId, zipTool } from './package.mjs';
 import { checkAutomaticNarration } from './qualify-voice.mjs';
 
 const { Runtime, environment, run } = await bundleTestModule('src/runtime.ts');
+const { SavedLessons } = await bundleTestModule('src/saved-lessons.ts');
 const archive = resolve(`${pluginId}.zip`);
 const fixture = resolve('scripts/fixture.py');
 const scratch = await mkdtemp(join(resolve(process.argv[2] ?? tmpdir()), 'manim-ci-'));
@@ -83,6 +85,14 @@ try {
   await media('ffmpeg', ['-nostdin', '-v', 'error', '-xerror', '-err_detect', 'explode', '-i', video,
     '-map', '0:v:0', '-map', '0:a:0', '-abort_on', 'empty_output_stream', '-f', 'null', '-'], 3);
 
+  const libraryDir = join(data, 'saved');
+  const first = randomUUID();
+  const second = randomUUID();
+  const signal = AbortSignal.timeout(minute);
+  const library = new SavedLessons(libraryDir);
+  await library.keep(first, 'First synthetic lesson', video, signal);
+  await library.keep(second, 'Second synthetic lesson', video, signal);
+
   const sentinel = join(data, 'qualification-sentinel');
   await writeFile(sentinel, 'keep plugin data\n', { flag: 'wx' });
   await rm(dist, { recursive: true });
@@ -90,7 +100,12 @@ try {
   assert.equal(await readFile(sentinel, 'utf8'), 'keep plugin data\n');
   assert.deepEqual(status(true), installed);
   assert.deepEqual(await runtime.ready(), local);
-  console.log('H.264/AAC duration, full decode and data persistence verified.');
+  const reopened = new SavedLessons(libraryDir);
+  assert.deepEqual(new Set((await reopened.list()).map(({ id }) => id)), new Set([first, second]));
+  const firstBytes = await reopened.chunk(first, 0);
+  assert.equal(Buffer.from(firstBytes, 'base64').subarray(4, 8).toString(), 'ftyp');
+  assert.deepEqual(await reopened.chunk(second, 0), firstBytes);
+  console.log('H.264/AAC duration, full decode, and two saved lessons after dist replacement verified.');
 } finally {
   await rm(scratch, { recursive: true, force: true, maxRetries: 3 });
 }

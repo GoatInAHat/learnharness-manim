@@ -9,6 +9,9 @@ export interface JobView {
   state: 'upload' | 'rendering' | 'ready' | 'failed' | 'cancelled';
   size?: number;
   error?: string;
+  title?: string;
+  warning?: string;
+  saved?: true;
 }
 
 export interface Status {
@@ -20,6 +23,7 @@ export interface Status {
   install: string | null;
   voiceReady: boolean;
   voiceDownloadMiB: number | null;
+  setupKey: string;
   jobs: JobView[];
 }
 

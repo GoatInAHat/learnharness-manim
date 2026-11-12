@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { appendFile, mkdtemp, open, readdir, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { CHUNK_BYTES, PLAN_BYTES, WAV_BYTES } from './protocol';
 import type { JobView, Narration } from './protocol';
 import { privateDirectory, Runtime } from './runtime';
+import { readVideoChunk, SavedLessons } from './saved-lessons';
 
 const lifetime = 30 * 60 * 1000;
 const renderTime = 12 * 60 * 1000;
@@ -35,12 +36,22 @@ interface Job extends JobView {
 
 export class Jobs {
   private readonly jobs = new Map<string, Job>();
+  private readonly saved: SavedLessons;
   private starting = 0;
 
-  constructor(private readonly root: string, private readonly runtime: Runtime, private readonly signal: AbortSignal) {}
+  constructor(private readonly root: string, private readonly runtime: Runtime, private readonly signal: AbortSignal) {
+    this.saved = new SavedLessons(join(root, 'saved'));
+  }
 
   list(): JobView[] {
-    return [...this.jobs.values()].map(({ id, state, size, error }) => ({ id, state, size, error })).reverse();
+    return [...this.jobs.values()].map(({ id, state, size, error, title, warning }) =>
+      ({ id, state, size, error, title, warning })).reverse();
+  }
+
+  async views() {
+    const saved = await this.saved.list();
+    const ids = new Set(saved.map(({ id }) => id));
+    return [...this.list().filter(({ id }) => !ids.has(id)), ...saved];
   }
 
   private find(id: unknown) {
@@ -62,10 +73,11 @@ export class Jobs {
       await writeFile(join(folder, 'plan.json'), input, { mode: 0o600 });
       await this.runtime.validate(folder, AbortSignal.any([this.signal, AbortSignal.timeout(15_000)]));
       this.signal.throwIfAborted();
+      const title = JSON.parse(input).title as string | undefined;
       const id = randomUUID();
       const timer = setTimeout(() => { void this.remove(id).catch(() => undefined); }, lifetime);
       timer.unref();
-      this.jobs.set(id, { id, state: 'upload', folder, narration, timer, abort: new AbortController(), audioSize: 0, writing: false });
+      this.jobs.set(id, { id, state: 'upload', folder, title, narration, timer, abort: new AbortController(), audioSize: 0, writing: false });
       folder = undefined;
       return id;
     } finally {
@@ -111,33 +123,43 @@ export class Jobs {
       try {
         const size = await this.runtime.render(job.folder, signal, job.narration);
         signal.throwIfAborted();
+        try {
+          await this.saved.keep(job.id, job.title ?? 'Manim lesson', join(job.folder, 'video.mp4'), signal);
+          job.saved = true;
+        }
+        catch (error) {
+          signal.throwIfAborted();
+          const message = (error as Error).message;
+          job.warning = message.startsWith('Recent lessons is full.') ? message :
+            'This video could not be kept in Manim. Save the MP4 before leaving.';
+        }
         job.size = size;
         job.state = 'ready';
       } catch (error) {
         job.state = job.abort.signal.aborted ? 'cancelled' : 'failed';
         job.error = timeout.aborted ? 'Render exceeded 12 minutes.' : job.state === 'failed' ? (error as Error).message : undefined;
       } finally {
-        // The video is the only artefact retained until deletion or expiry.
+        // Retain a temporary MP4 only if we could not keep the durable copy.
         const entries = await readdir(job.folder);
-        await Promise.allSettled(entries.filter((path) => path !== 'video.mp4' || job.state !== 'ready')
+        await Promise.allSettled(entries.filter((path) => path !== 'video.mp4' || job.state !== 'ready' || job.saved)
           .map((path) => rm(join(job.folder, path), { recursive: true, force: true })));
       }
     })();
   }
 
   async chunk(id: unknown, value: unknown) {
-    const job = this.find(id);
-    if (job.state !== 'ready' || !job.size) throw new Error('Video is still unavailable.');
-    const offset = integer(value, job.size - 1);
-    const file = await open(join(job.folder, 'video.mp4'), 'r');
-    try {
-      const buffer = Buffer.alloc(Math.min(CHUNK_BYTES, job.size - offset));
-      const { bytesRead } = await file.read(buffer, 0, buffer.length, offset);
-      if (bytesRead !== buffer.length) throw new Error('The temporary video was truncated.');
-      return buffer.toString('base64');
-    } finally {
-      await file.close();
-    }
+    if (typeof id !== 'string') throw new Error('Expected a lesson ID.');
+    const job = this.jobs.get(id);
+    if (!job || job.saved || job.state !== 'ready') return this.saved.chunk(id, integer(value, Number.MAX_SAFE_INTEGER));
+    if (!job.size) throw new Error('Video is still unavailable.');
+    return readVideoChunk(join(job.folder, 'video.mp4'), job.size, integer(value, job.size - 1));
+  }
+
+  async deleteSaved(id: unknown) {
+    this.signal.throwIfAborted();
+    if (typeof id !== 'string') throw new Error('Expected a lesson ID.');
+    await this.saved.delete(id);
+    if (this.jobs.has(id)) await this.remove(id);
   }
 
   async remove(id: unknown) {

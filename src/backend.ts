@@ -27,12 +27,18 @@ export const activate: PluginBackendModule['activate'] = (ctx) => {
   });
 
   ctx.cleanup(ctx.handle('status', async (): Promise<Status> => ({
-    ...await runtime.status(), install: installation?.progress ?? null, jobs: jobs.list(),
+    ...await runtime.status(), install: installation?.progress ?? null, jobs: await jobs.views(),
   })));
   ctx.cleanup(ctx.handle('install', (raw) => {
-    const { confirmed, narration } = object(raw);
+    const { confirmed, narration, allowRuntime, allowVoice, setupKey } = object(raw);
     if (confirmed !== true) throw new Error('Confirm the local setup download first.');
     if (narration !== 'automatic' && narration !== 'silent' && narration !== 'wav') throw new Error('Select a narration option.');
+    if (typeof allowRuntime !== 'boolean' || typeof allowVoice !== 'boolean' ||
+        (!allowRuntime && !allowVoice) || (allowVoice && narration !== 'automatic')) {
+      throw new Error('Confirm the components shown for this narration option.');
+    }
+    const changed = 'The local setup changed. Check the updated download size and confirm it again.';
+    if (setupKey !== runtime.setupKey) throw new Error(changed);
     if (installation) throw new Error('An installation is already running.');
     ctx.signal.throwIfAborted();
     const abort = new AbortController();
@@ -42,8 +48,10 @@ export const activate: PluginBackendModule['activate'] = (ctx) => {
     installation = task;
     const progress = (message: string) => { task.progress = message; };
     task.work = (async () => {
-      await runtime.install(signal, progress);
-      if (narration === 'automatic') await runtime.installVoice(signal, progress);
+      if (!allowRuntime && !await runtime.ready()) throw new Error(changed);
+      if (narration === 'automatic' && !allowVoice && !await runtime.hasVerifiedVoice(signal)) throw new Error(changed);
+      if (allowRuntime) await runtime.install(signal, progress);
+      if (allowVoice) await runtime.installVoice(signal, progress);
     })().finally(() => { installation = undefined; });
     return task.work.then(() => ({ installed: true }));
   }));
@@ -66,6 +74,7 @@ export const activate: PluginBackendModule['activate'] = (ctx) => {
     return jobs.chunk(id, offset);
   }));
   ctx.cleanup(ctx.handle('remove', async (raw) => { await jobs.remove(object(raw).id); return true; }));
+  ctx.cleanup(ctx.handle('deleteSaved', async (raw) => { await jobs.deleteSaved(object(raw).id); return true; }));
 
   async function availableModels(): Promise<DraftModel[]> {
     const catalog = await ctx.inference.catalog();
@@ -122,7 +131,7 @@ export const activate: PluginBackendModule['activate'] = (ctx) => {
     agents: [...nativeAgents],
     create: () => [{
       name: 'manim_render_lesson', label: 'Render Manim lesson',
-      description: 'Render an already validated semantic math scene v3 JSON plan. Requires the local runtime and defaults to automatic narration with the installed offline voice. Use silent only when requested. Returns a disposable job in Manim Explainer.',
+      description: 'Render an already validated semantic math scene v3 JSON plan. Requires the local runtime and defaults to automatic narration with the installed offline voice. Use silent only when requested. Find completed videos under Recent lessons in Manim Explainer.',
       parameters: Type.Object({ plan: Type.String({ minLength: 1, maxLength: PLAN_BYTES }),
         narration: Type.Optional(Type.Union([Type.Literal('automatic'), Type.Literal('silent')])) }, { additionalProperties: false }),
       async execute(_call, input, signal) {

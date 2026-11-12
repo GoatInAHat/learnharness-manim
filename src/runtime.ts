@@ -214,6 +214,7 @@ async function runtimeFile(prefix: string, path: string) {
 
 export class Runtime {
   private voiceInvalid = false;
+  readonly setupKey = [host, versions.manim, binary?.[3], voiceRelease, voiceDownloadMiB].join(':');
   constructor(private readonly assets: string, private readonly data: string) {}
 
   private async paths() {
@@ -236,6 +237,7 @@ export class Runtime {
       if (!(await lstat(prefix)).isDirectory() || !(await lstat(dirname(prefix))).isDirectory()) return null;
       const python = await runtimeFile(prefix, pythonAt(prefix));
       if (await digest(python) !== pythonSha) return null;
+      await runtimeFile(prefix, ffmpegAt(prefix));
       return { prefix, python };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT' || error instanceof SyntaxError) return null;
@@ -246,7 +248,7 @@ export class Runtime {
   async status() {
     return { supported: Boolean(binary), platform: binary?.[0] ?? host,
       downloadMiB: binary?.[3] ?? null, ready: Boolean(await this.ready()), versions,
-      voiceReady: !this.voiceInvalid && Boolean(await this.voiceReady()), voiceDownloadMiB };
+      voiceReady: !this.voiceInvalid && Boolean(await this.voiceReady()), voiceDownloadMiB, setupKey: this.setupKey };
   }
 
   private async voiceReady(signal?: AbortSignal) {
@@ -267,6 +269,12 @@ export class Runtime {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
       throw error;
     }
+  }
+
+  async hasVerifiedVoice(signal: AbortSignal) {
+    const ready = Boolean(await this.voiceReady(signal));
+    this.voiceInvalid = !ready;
+    return ready;
   }
 
   async installVoice(signal: AbortSignal, progress: (message: string) => void) {

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, relative, sep } from 'node:path';
 import { test } from 'node:test';
@@ -8,8 +9,8 @@ import { bundleTestModule } from './bundle-test-module.mjs';
 import { pack, packageFiles, pluginId, zipTool } from './package.mjs';
 
 const require = createRequire(import.meta.url);
-const [{ Jobs }, { environment, run }, { CHUNK_BYTES, WAV_BYTES }, { emptyNarration, placeUtterance }] = await Promise.all(
-  ['src/jobs.ts', 'src/runtime.ts', 'src/protocol.ts', 'src/voice.ts'].map(bundleTestModule),
+const [{ Jobs }, { environment, run }, { CHUNK_BYTES, WAV_BYTES }, { emptyNarration, placeUtterance }, { SavedLessons }] = await Promise.all(
+  ['src/jobs.ts', 'src/runtime.ts', 'src/protocol.ts', 'src/voice.ts', 'src/saved-lessons.ts'].map(bundleTestModule),
 );
 
 async function scratch(t) {
@@ -56,7 +57,49 @@ test('standalone package extracts to the LearnHarness plugin layout and activate
   assert.equal(status.voiceReady, false);
   assert.throws(() => operations.get('install')({ confirmed: 'true', narration: 'automatic' }), /Confirm the local setup download/);
   assert.throws(() => operations.get('install')({ confirmed: true, narration: 'unexpected' }), /Select a narration option/);
+  assert.throws(() => operations.get('install')({ confirmed: true, narration: 'silent', allowRuntime: false, allowVoice: true }), /Confirm the components/);
+  assert.throws(() => operations.get('install')({ confirmed: true, narration: 'automatic', allowRuntime: true, allowVoice: true, setupKey: 'stale' }), /setup changed/);
+  await assert.rejects(operations.get('install')({ confirmed: true, narration: 'automatic', allowRuntime: false,
+    allowVoice: true, setupKey: status.setupKey }), /setup changed/);
   assert.deepEqual(await readdir(plugin), ['dist']);
+});
+
+test('completed lessons reopen after a new backend and disposing temporary jobs never deletes them', async (t) => {
+  const folder = await scratch(t);
+  const signal = new AbortController().signal;
+  const video = Buffer.alloc(CHUNK_BYTES + 3, 52);
+  const runtime = { ready: async () => true, validate: async () => {}, render: async (job) => {
+    await writeFile(join(job, 'video.mp4'), video);
+    return video.length;
+  } };
+  const jobs = new Jobs(folder, runtime, signal);
+  const ids = [];
+  for (const title of ['First lesson', 'Second lesson']) {
+    const id = await jobs.create(JSON.stringify({ title }), 'silent');
+    ids.push(id);
+    jobs.start(id);
+    for (let i = 0; i < 100 && !jobs.list().some(j => j.id === id && j.state === 'ready'); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.ok((await jobs.views()).some(j => j.id === id && j.saved));
+  }
+  await jobs.dispose();
+  const reopened = new Jobs(folder, runtime, signal);
+  assert.deepEqual(new Set((await reopened.views()).map(j => j.id)), new Set(ids));
+  for (const id of ids) {
+    assert.equal(await reopened.chunk(id, 0), video.subarray(0, CHUNK_BYTES).toString('base64'));
+    assert.equal(await reopened.chunk(id, CHUNK_BYTES), video.subarray(CHUNK_BYTES).toString('base64'));
+  }
+  await assert.rejects(reopened.chunk('../video.mp4', 0), /unavailable/);
+  await assert.rejects(reopened.remove(ids[0]), /expired/);
+  await reopened.deleteSaved(ids[0]);
+  assert.deepEqual((await reopened.views()).map(j => j.id), [ids[1]]);
+  const saved = new SavedLessons(join(folder, 'saved'));
+  await assert.rejects(saved.keep(ids[1], 'Cannot overwrite', join(folder, 'saved', ids[1], 'video.mp4'), signal));
+  assert.equal((await saved.list())[0].title, 'Second lesson');
+  const aborted = AbortSignal.abort(new Error('cancelled'));
+  await assert.rejects(saved.keep(randomUUID(), 'Cancelled', join(folder, 'saved', ids[1], 'video.mp4'), aborted), /cancelled/);
+  assert.equal((await saved.list()).length, 1);
 });
 
 test('job API caps UTF-8 plans, chunk ordering, and total WAV bytes, and cancels running work', async (t) => {

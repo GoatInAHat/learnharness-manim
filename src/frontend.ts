@@ -21,7 +21,7 @@ export const activate: PluginFrontendModule['activate'] = (ctx) => {
       install.disabled = true;
       const confirmed = consent.checked;
       consent.checked = false;
-      try { await ctx.call('install', { confirmed, narration: narration.value }); }
+      try { await ctx.call('install', { confirmed, narration: narration.value, ...setupScope }); }
       finally { if (!signal.aborted) await refresh(); }
     });
     consent.addEventListener('change', updateControls);
@@ -131,6 +131,10 @@ export const activate: PluginFrontendModule['activate'] = (ctx) => {
     notice.setAttribute('role', 'status');
     const jobs = document.createElement('ul');
     root.append(jobs);
+    const recentHeading = document.createElement('h2');
+    recentHeading.textContent = 'Recent lessons';
+    const recent = document.createElement('ul');
+    root.append(recentHeading, recent);
     const player = document.createElement('video');
     player.controls = true;
     player.preload = 'metadata';
@@ -146,6 +150,7 @@ export const activate: PluginFrontendModule['activate'] = (ctx) => {
     let loaded: { id: string; url: string } | undefined;
     let loading = false;
     let jobSignature = '';
+    let setupScope = { allowRuntime: false, allowVoice: false, setupKey: '' };
     let drafting: string | undefined;
     let models: DraftModel[] = [];
     let modelsLoaded = false;
@@ -193,8 +198,13 @@ export const activate: PluginFrontendModule['activate'] = (ctx) => {
 
     function updateControls() {
       const automatic = narration.value === 'automatic';
-      const needsRuntime = current?.supported && !current.ready;
+      const needsRuntime = Boolean(current?.supported && !current.ready);
       const needsVoice = automatic && Boolean(current?.voiceDownloadMiB) && !current?.voiceReady;
+      const setupKey = current?.setupKey ?? '';
+      if (setupScope.allowRuntime !== needsRuntime || setupScope.allowVoice !== needsVoice || setupScope.setupKey !== setupKey) {
+        consent.checked = false;
+      }
+      setupScope = { allowRuntime: needsRuntime, allowVoice: needsVoice, setupKey };
       const runtimeMiB = needsRuntime ? current?.downloadMiB ?? 0 : 0;
       const voiceMiB = needsVoice ? current?.voiceDownloadMiB ?? 0 : 0;
       const downloads = [needsRuntime && 'Manim runtime', needsVoice && 'offline English voice'].filter(Boolean).join(' and ');
@@ -228,15 +238,25 @@ export const activate: PluginFrontendModule['activate'] = (ctx) => {
         const signature = JSON.stringify(status.jobs);
         if (jobSignature === signature) return;
         jobSignature = signature;
-        jobs.replaceChildren(...status.jobs.map(jobRow));
+        jobs.replaceChildren(...status.jobs.filter((job) => !job.saved).map(jobRow));
+        recent.replaceChildren(...status.jobs.filter((job) => job.saved).map(jobRow));
+        recentHeading.hidden = recent.hidden = !recent.childElementCount;
         if (loaded && !status.jobs.some((job) => job.id === loaded?.id)) clearPreview();
       } finally { refreshing = false; }
     }
 
     function jobRow(job: JobView) {
       const row = document.createElement('li');
-      row.append(job.error ? `Render failed. ${job.error}` : `Render ${job.state}`);
+      row.append(job.saved ? (job.title ?? 'Saved lesson') : job.error ? `Render failed. ${job.error}` :
+        `Render ${job.state}${job.warning ? `. ${job.warning}` : ''}`);
       if (job.state === 'ready') button('Preview', () => preview(job), row);
+      if (job.saved) {
+        button('Delete saved lesson', async () => {
+          await ctx.call('deleteSaved', { id: job.id });
+          if (!signal.aborted) await refresh();
+        }, row);
+        return row;
+      }
       button(job.state === 'rendering' ? 'Cancel' : 'Delete', async () => {
         await ctx.call('remove', { id: job.id });
         if (!signal.aborted) await refresh();
