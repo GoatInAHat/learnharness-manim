@@ -5,17 +5,18 @@ import sys
 import textwrap
 import wave
 from array import array
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
 from manim import (
-    DOWN, LEFT, RIGHT, UP, Animation, Axes, Dot, Line, MathTypst, MovingCameraScene,
-    Rectangle, Text, VMobject, linear, tempconfig,
+    DOWN, LEFT, RIGHT, UP, Animation, Dot, MathTypst, Rectangle, Scene,
+    Text, VGroup, VMobject, linear, tempconfig,
 )
 
 # Isolated Python omits the script directory. This path is trusted packaged code.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from plan import PlanError, load, require
+from plan import PlanError, load, require, value_and_derivative
 from semantic import DISPLAYS, FPS, MAX_PLAN, Frame, compile_frame, validate
 
 BACKGROUND = '#111827'
@@ -25,6 +26,10 @@ BLUE = '#70A5FF'
 TEAL = '#64E5CD'
 PINK = '#F4A1CB'
 YELLOW = '#F9D77E'
+GRID = '#2D3B51'
+PLOT_MIN = np.array([-5.5, -2.91])
+PLOT_MAX = np.array([6.55, 2.43])
+PLOT_SIZE = PLOT_MAX - PLOT_MIN
 
 
 def label(text, size, color=PAPER, width=12):
@@ -34,68 +39,140 @@ def label(text, size, color=PAPER, width=12):
     return result
 
 
-def ticks(low, high):
-    exponent = 10 ** math.floor(math.log10((high - low) / 6))
-    step = next(multiplier * exponent for multiplier in (1, 2, 5, 10) if multiplier * exponent >= (high - low) / 8)
-    return step
+def ticks(low, span, count):
+    spacing = span / count
+    exponent = 10 ** math.floor(math.log10(spacing))
+    step = next(n * exponent for n in (1, 2, 5, 10) if n * exponent >= spacing)
+    return [i * step for i in range(math.ceil(low / step), math.floor((low + span) / step) + 1)]
+
+
+def clip_segments(starts, ends):
+    """Intersect each parametric segment with the screen-space plot rectangle."""
+    delta = ends - starts
+    parallel = delta == 0
+    divisor = np.where(parallel, 1, delta)
+    first = (PLOT_MIN - starts) / divisor
+    last = (PLOT_MAX - starts) / divisor
+    enter = np.max(np.where(parallel, -np.inf, np.minimum(first, last)), axis=1).clip(0, 1)
+    leave = np.min(np.where(parallel, np.inf, np.maximum(first, last)), axis=1).clip(0, 1)
+    outside = np.any(parallel & ((starts < PLOT_MIN) | (starts > PLOT_MAX)), axis=1)
+    visible = (enter < leave) & ~outside & np.any(~parallel, axis=1)
+    start = starts[visible]
+    direction = delta[visible]
+    return ((start + enter[visible, None] * direction).clip(PLOT_MIN, PLOT_MAX),
+            (start + leave[visible, None] * direction).clip(PLOT_MIN, PLOT_MAX))
+
+
+def set_segments(path, starts, ends):
+    starts, ends = np.asarray(starts).reshape(-1, 2), np.asarray(ends).reshape(-1, 2)
+    # Straight cubic segments. Manim joins adjacent segments with coincident ends.
+    points = starts[:, None] + (ends - starts)[:, None] * np.linspace(0, 1, 4)[None, :, None]
+    path.set_points(np.pad(points.reshape(-1, 2), ((0, 0), (0, 1))))
+
+
+def slope_text(value):
+    if value == 0:
+        return '0.000'
+    return f'{value:.3f}' if 0.001 <= abs(value) < 10_000 else f'{value:.4g}'
 
 
 class Timeline(Animation):
     def __init__(self, scene):
         self.scene = scene
-        super().__init__(scene.camera.frame, run_time=scene.plan['duration'], rate_func=linear)
+        super().__init__(scene.content, run_time=scene.plan['duration'], rate_func=linear)
 
     def interpolate_mobject(self, alpha):
         frame = min(round(alpha * self.run_time * FPS), self.scene.plan['duration'] * FPS - 1)
         self.scene.draw_frame(compile_frame(self.scene.plan, frame))
 
 
-class LessonScene(MovingCameraScene):
+class LessonScene(Scene):
     def __init__(self, plan):
         self.plan = plan
         super().__init__()
 
-    def construct(self):
-        self.frame = self.camera.frame
-        self.width, self.height = self.frame.width, self.frame.height
-        self.hud = []
+    def setup(self):
+        self.content = VGroup()
+        self.last_visual = None
         self.make_plot()
         self.make_geometry()
         self.make_hud()
+        self.add(self.content)
+
+    def construct(self):
         self.play(Timeline(self))
 
+    def get_moving_and_static_mobjects(self, animations):
+        # Resolve the group's current children on each frame, including new tick
+        # labels and captions. Cairo's default snapshot holds on to old children.
+        return [self.content], []
+
     def make_plot(self):
-        x_min, x_max = self.plan['domain']
-        values = [y for _, y in self.plan['samples']]
-        viewports = [beat['camera'] for beat in self.plan['beats']]
-        y_min = min(min(values), *(y - h / 2 for _, y, _, h in viewports))
-        y_max = max(max(values), *(y + h / 2 for _, y, _, h in viewports))
-        x_step, y_step = ticks(x_min, x_max), ticks(y_min, y_max)
-        self.axes = Axes(x_range=(x_min, x_max, x_step), y_range=(y_min, y_max, y_step),
-                         x_length=10.4, y_length=5.0, axis_config={'color': MUTED, 'stroke_width': 1.5, 'include_tip': False})
-        self.add(self.axes)
-        for low, high, step, axis, direction in [(x_min, x_max, x_step, self.axes.x_axis, DOWN),
-                                                 (y_min, y_max, y_step, self.axes.y_axis, LEFT)]:
-            for i in range(math.ceil(low / step), math.floor(high / step) + 1):
-                if i == 0 and direction is LEFT and x_min <= 0 <= x_max:
-                    continue
-                self.add(label(f'{i * step:.4g}', 17, MUTED).next_to(axis.n2p(i * step), direction, buff=0.11))
-        curve = VMobject(color=BLUE, stroke_width=4).set_points_as_corners([self.axes.c2p(x, y) for x, y in self.plan['samples']])
-        self.add(curve)
+        self.grid = VMobject(color=GRID, stroke_width=1.2)
+        self.axes = VMobject(color=MUTED, stroke_width=1.35, stroke_opacity=0.65)
+        self.curve = VMobject(color=BLUE, stroke_width=3.3)
+        self.tick_labels = VGroup()
+        self.tick_label = lru_cache(maxsize=128)(label)
+        self.viewport = None
+        self.content.add(self.grid, self.axes, self.tick_labels, self.curve)
+        self.pin(label(self.plan['y_label'], 19, MUTED, 4), PLOT_MIN[0], 2.64, edge=1)
+        self.pin(label(self.plan['x_label'], 19, MUTED, 4), PLOT_MAX[0], -3.37, edge=-1)
+
+    def draw_grid(self, viewport):
+        if viewport == self.viewport:
+            return
+        cx, cy, width, height = viewport
+        self.span = np.array([width, height])
+        self.low = np.array([cx, cy]) - self.span / 2
+        self.viewport = viewport
+        starts, ends, labels = [], [], []
+        for axis, count, direction in [(0, 8, DOWN), (1, 6, LEFT)]:
+            for value in ticks(self.low[axis], self.span[axis], count):
+                start, end = PLOT_MIN.copy(), PLOT_MAX.copy()
+                start[axis] = end[axis] = PLOT_MIN[axis] + (value - self.low[axis]) / self.span[axis] * PLOT_SIZE[axis]
+                starts.append(start)
+                ends.append(end)
+                tick = self.tick_label(f'{value:.8g}', 17, MUTED, 1.42 if axis else 1.1).copy()
+                labels.append(tick.next_to((*start, 0), direction, buff=0.14))
+        set_segments(self.grid, starts, ends)
+        self.tick_labels.submobjects[:] = labels
+        starts, ends = [PLOT_MIN, PLOT_MIN], [(PLOT_MAX[0], PLOT_MIN[1]), (PLOT_MIN[0], PLOT_MAX[1])]
+        zero_x, zero_y = self.project((0, 0))
+        if PLOT_MIN[0] < zero_x < PLOT_MAX[0]:
+            starts.append((zero_x, PLOT_MIN[1]))
+            ends.append((zero_x, PLOT_MAX[1]))
+        if PLOT_MIN[1] < zero_y < PLOT_MAX[1]:
+            starts.append((PLOT_MIN[0], zero_y))
+            ends.append((PLOT_MAX[0], zero_y))
+        set_segments(self.axes, starts, ends)
+
+    def project(self, points):
+        return PLOT_MIN + (np.asarray(points) - self.low) / self.span * PLOT_SIZE
+
+    def draw_curve(self, state):
+        low = max(self.plan['domain'][0], self.low[0])
+        high = min(self.plan['domain'][1], self.low[0] + self.span[0])
+        expr = self.plan['expr']
+        if low >= high:
+            self.curve.clear_points()
+            return
+        anchors = [state['p'][0], state['q'][0]]
+        if state['reference']:
+            anchors.append(state['reference'][0])
+        if expr[0] == 'piece':
+            anchors.append(expr[1])
+        # Sample across the visible domain so zoomed curves still pass through P and Q.
+        xs = sorted(set(np.linspace(low, high, 401)) | {x for x in anchors if low < x < high})
+        points = self.project([(x, value_and_derivative(expr, x)[0]) for x in xs])
+        set_segments(self.curve, *clip_segments(points[:-1], points[1:]))
 
     def pin(self, obj, x, y, edge=0):
-        obj.set_z_index(10)
-        self.hud.append((obj, obj.width, obj.height, x, y, edge))
-        self.add(obj)
-        return obj
+        self.content.add(obj.move_to((x + edge * obj.width / 2, y, 0)))
 
     def make_hud(self):
-        for y, height in [(0.421, 0.16), (-0.457, 0.089)]:
-            self.pin(Rectangle(width=self.width * 1.01, height=self.height * height, stroke_width=0,
-                               fill_color=BACKGROUND, fill_opacity=1), 0, y)
-        self.pin(label(self.plan['title'], 33, width=7.4), -0.451, 0.456, edge=1)
-        self.pin(label(self.plan['y_label'], 19, MUTED, 3.6), -0.451, 0.386, edge=1)
-        self.pin(label(self.plan['x_label'], 19, MUTED, 3.6), 0.451, 0.386, edge=-1)
+        self.pin(label(self.plan['title'], 33, width=9.8), -7.1, 3.55, edge=1)
+        self.pin(Rectangle(width=14.2, height=0.012, stroke_width=0, fill_color=GRID, fill_opacity=1),
+                 0, 2.56)
         f, x = self.plan['function'], self.plan['variable']
         # Only single validated ASCII identifiers enter these static math templates.
         fraction = f'frac({f}(a+h) - {f}(a), h)'
@@ -108,106 +185,124 @@ class LessonScene(MovingCameraScene):
         self.formulas = {}
         self.modes = {}
         for mode, formula in zip(DISPLAYS, formulas):
-            obj = MathTypst(formula, font_size=32, color=PAPER)
-            if obj.width > 6.3:
-                obj.scale_to_fit_width(6.3)
-            if obj.height > 0.48:
-                obj.scale_to_fit_height(0.48)
-            self.formulas[mode] = self.pin(obj, 0, 0.382)
-            text = mode.title()
-            if self.plan['unit'] and mode in {'secant', 'limit', 'tangent', 'compare'}:
-                text += ' · ' + self.plan['unit']
-            self.modes[mode] = self.pin(label(text, 19, YELLOW if mode in {'secant', 'limit'} else TEAL, 3.6), 0.451, 0.454, edge=-1)
+            obj = MathTypst(formula, font_size=34, color=PAPER)
+            obj.scale(min(1, 5.7 / obj.width, 0.65 / obj.height))
+            # Keep Typst's imported fraction rule and native glyph styles.
+            self.formulas[mode] = obj.move_to((0, 3.09, 0))
+            badge = label(mode.title(), 19, YELLOW if mode in {'secant', 'limit'} else TEAL, 3.6)
+            self.modes[mode] = badge.move_to((7.1 - badge.width / 2, 3.55, 0))
         self.captions = {}
         for beat in self.plan['beats']:
             caption = beat.get('caption')
             if caption and caption not in self.captions:
-                self.captions[caption] = self.pin(label(textwrap.fill(caption, width=85), 25, width=12), 0, -0.455)
+                self.captions[caption] = label(textwrap.fill(caption, width=85), 25, width=12).move_to((0, -3.65, 0))
+        self.hud = VGroup()
+        self.readouts = {}
+        self.content.add(self.hud)
+
+    def readout(self, key, text, y, color, edge):
+        previous, obj = self.readouts.get(key, (None, None))
+        if previous != text:
+            obj = label(text, 20, color, 4) if text else None
+            if obj is not None:
+                obj.move_to((edge * (-7.1 + obj.width / 2), y, 0))
+            self.readouts[key] = (text, obj)
+        return obj
+
+    def draw_hud(self, state):
+        display = state['display']
+        secant = state['lineKind'] == 'secant'
+        items = [self.formulas[display], self.modes[display], self.captions.get(state['caption'])]
+        if display != 'function':
+            anchor = f"P at {self.plan['variable']} = {state['p'][0]:.8g}"
+            interval = f"h = {state['h']:.4g} · Q distinct" if secant else 'h = 0 · Q = P'
+            items.extend([self.readout('anchor', anchor, 3.22, MUTED, 1),
+                          self.readout('interval', interval, 2.93, PINK if secant else PAPER, 1)])
+        if display in {'secant', 'limit', 'tangent', 'compare'}:
+            unit = ' ' + self.plan['unit'] if self.plan['unit'] else ''
+            kind = state['lineKind'].title()
+            slope = f"{kind} ≈ {slope_text(state['slope'])}{unit}"
+            items.append(self.readout('slope', slope, 3.16, YELLOW if secant else TEAL, -1))
+            if state['reference']:
+                reference = f"B ≈ {slope_text(state['reference'][2])}{unit}"
+                items.append(self.readout('reference', reference, 2.88, PINK, -1))
+        self.hud.submobjects[:] = [obj for obj in items if obj is not None]
 
     def make_geometry(self):
-        self.slope_line = Line(LEFT, RIGHT, stroke_width=4)
-        self.reference_line = Line(LEFT, RIGHT, stroke_width=4, color=PINK)
+        self.slope_line = VMobject(stroke_width=2.5)
+        self.reference_line = VMobject(stroke_width=2.5, color=PINK)
         self.base = Dot(radius=0.073, color=PAPER)
-        self.moving = Dot(radius=0.073, color=PINK)
+        self.moving = Dot(radius=0.093, color=PINK, fill_opacity=0, stroke_width=1.65)
         self.reference = Dot(radius=0.073, color=PINK)
         self.base_label = MathTypst('P', font_size=28, color=PAPER)
         self.moving_label = MathTypst('Q', font_size=28, color=PINK)
         self.reference_label = MathTypst('B', font_size=28, color=PINK)
-        self.delta_x = Line(LEFT, RIGHT, stroke_width=2.7, color=PINK)
-        self.delta_y = Line(DOWN, UP, stroke_width=2.7, color=PINK)
+        self.changes = VMobject(stroke_width=1.5, color=PINK)
         self.interval = MathTypst('h', font_size=24, color=PINK)
-        self.add(self.slope_line, self.reference_line, self.delta_x, self.delta_y, self.interval,
-                 self.base, self.moving, self.reference, self.base_label, self.moving_label, self.reference_label)
+        self.geometry = VGroup()
+        self.content.add(self.slope_line, self.reference_line, self.changes, self.geometry)
 
     def draw_frame(self, state: Frame):
-        cx, cy, width, height = state['viewport']
-        center = self.axes.c2p(cx, cy)
-        size = self.axes.c2p(cx + width, cy + height) - center
-        # Fit the authored viewport into the space between the fixed overlays.
-        size[1] /= 0.75
-        center = center + UP * (size[1] * 0.035)
-        self.frame.stretch_to_fit_width(size[0]).stretch_to_fit_height(size[1]).move_to(center)
-        for item, w, h, x, y, edge in self.hud:
-            item.stretch_to_fit_width(w * size[0] / self.width).stretch_to_fit_height(h * size[1] / self.height)
-            item.move_to(center + RIGHT * (x * size[0] + edge * item.width / 2) + UP * (y * size[1]))
+        visual = (state['viewport'], state['display'], state['p'], state['q'], state['h'],
+                  state['slope'], state['reference'], state['caption'])
+        if visual == self.last_visual:
+            return
+        self.last_visual = visual
+        self.draw_grid(state['viewport'])
+        self.draw_curve(state)
+        self.draw_hud(state)
         display = state['display']
-        for mode in DISPLAYS:
-            self.formulas[mode].set_opacity(float(mode == display))
-            self.modes[mode].set_opacity(float(mode == display))
-        for caption, obj in self.captions.items():
-            obj.set_opacity(float(caption == state['caption']))
-        first, second = self.axes.c2p(*state['p']), self.axes.c2p(*state['q'])
+        first, second = self.project((state['p'], state['q']))
         secant = state['lineKind'] == 'secant'
-        show_points = display != 'function'
-        scale = (size[0] / self.width, size[1] / self.height)
-        close = np.linalg.norm((second - first)[:2] / scale) < 0.18
-        self.point(self.base, self.base_label, first, show_points, UP + LEFT, scale)
-        self.point(self.moving, self.moving_label, second, show_points and secant, UP + RIGHT, scale, close)
-        show_changes = display in {'difference', 'secant', 'limit'}
-        elbow = self.axes.c2p(state['q'][0], state['p'][1])
-        self.place_line(self.delta_x, first, elbow, show_changes)
-        self.place_line(self.delta_y, elbow, second, show_changes)
-        self.interval.move_to((first + elbow) / 2 + DOWN * 0.18).set_opacity(float(show_changes))
-        self.slope_line.set_color(YELLOW if secant else TEAL)
-        if display in {'secant', 'limit', 'tangent', 'compare'}:
-            self.slope(self.slope_line, *state['p'], state['slope'], state['viewport'])
-        else:
-            self.slope_line.set_opacity(0)
         reference = state['reference']
+        left_to_right = (reference[0] >= state['p'][0]) if reference else state['h'] >= 0
+        side = RIGHT if left_to_right else LEFT
+        self.geometry.submobjects.clear()
+        if display != 'function':
+            self.point(self.base, self.base_label, first, -side)
+            if secant:
+                self.point(self.moving, self.moving_label, second, side)
+        if display in {'difference', 'secant', 'limit'}:
+            elbow = np.array([second[0], first[1]])
+            set_segments(self.changes, *clip_segments(np.array([first, elbow]), np.array([elbow, second])))
+            if abs(elbow[0] - first[0]) >= 0.09 and self.inside((first + elbow) / 2):
+                center = (first + elbow) / 2
+                center[1] += 0.22 if center[1] < PLOT_MIN[1] + 0.32 else -0.22
+                self.place_label(self.interval, center)
+                self.geometry.add(self.interval)
+        else:
+            self.changes.clear_points()
+        if display in {'secant', 'limit', 'tangent', 'compare'}:
+            self.slope_line.set_color(YELLOW if secant else TEAL)
+            self.slope(self.slope_line, *state['p'], state['slope'])
+        else:
+            self.slope_line.clear_points()
         if reference:
-            self.point(self.reference, self.reference_label, self.axes.c2p(*reference[:2]), True, UP + RIGHT, scale)
-            self.slope(self.reference_line, *reference, state['viewport'])
+            self.point(self.reference, self.reference_label, self.project(reference[:2]), side)
+            self.slope(self.reference_line, *reference)
         else:
-            for item in (self.reference, self.reference_label, self.reference_line):
-                item.set_opacity(0)
+            self.reference_line.clear_points()
 
-    def slope(self, line, x, y, slope, viewport):
-        cx, cy, w, h = viewport
-        low, high = cx - w / 2, cx + w / 2
-        if slope:
-            bounds = sorted(x + (edge - y) / slope for edge in (cy - h / 2, cy + h / 2))
-            low, high = max(low, bounds[0]), min(high, bounds[1])
-        if high > low and (slope or cy - h / 2 <= y <= cy + h / 2):
-            self.place_line(line, self.axes.c2p(low, y + slope * (low - x)),
-                            self.axes.c2p(high, y + slope * (high - x)), True)
-        else:
-            line.set_opacity(0)
+    def slope(self, line, x, y, slope):
+        low, high = self.low[0], self.low[0] + self.span[0]
+        start, end = self.project(((low, y + slope * (low - x)), (high, y + slope * (high - x))))
+        set_segments(line, *clip_segments(start[None, :], end[None, :]))
 
     @staticmethod
-    def point(dot, label_, point, visible, direction, scale, ring=False):
-        dot.stretch_to_fit_width(scale[0] * (0.22 if ring else 0.146))
-        dot.stretch_to_fit_height(scale[1] * (0.22 if ring else 0.146))
-        dot.move_to(point).set_fill(opacity=float(visible and not ring))
-        dot.set_stroke(width=2 if ring else 0, opacity=float(visible and ring))
-        label_.scale_to_fit_height(0.27 * scale[1])
-        label_.next_to(dot, direction, buff=0.06 * min(scale)).set_opacity(float(visible))
+    def inside(point):
+        return np.all((PLOT_MIN - 1e-8 <= point) & (point <= PLOT_MAX + 1e-8))
 
     @staticmethod
-    def place_line(line, start, end, visible):
-        visible = visible and np.linalg.norm(end - start) > 1e-9
-        if visible:
-            line.put_start_and_end_on(start, end)
-        line.set_opacity(float(visible))
+    def place_label(obj, center):
+        padding = np.array([obj.width, obj.height]) / 2 + 0.05
+        obj.move_to((*np.clip(center, PLOT_MIN + padding, PLOT_MAX - padding), 0))
+
+    def point(self, dot, label_, point, side):
+        if self.inside(point):
+            dot.move_to((*point, 0))
+            center = point + (side * (dot.radius + label_.width / 2 + 0.08) + UP * 0.18)[:2]
+            self.place_label(label_, center)
+            self.geometry.add(dot, label_)
 
 
 def narration_at(job, plan):
