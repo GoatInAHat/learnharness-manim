@@ -170,7 +170,7 @@ class LessonScene(Scene):
         self.content.add(obj.move_to((x + edge * obj.width / 2, y, 0)))
 
     def make_hud(self):
-        self.pin(label(self.plan['title'], 33, width=9.8), -7.1, 3.55, edge=1)
+        self.pin(label(self.plan['title'], 33, width=9.8), -6.6, 3.55, edge=1)
         self.pin(Rectangle(width=14.2, height=0.012, stroke_width=0, fill_color=GRID, fill_opacity=1),
                  0, 2.56)
         f, x = self.plan['function'], self.plan['variable']
@@ -190,7 +190,7 @@ class LessonScene(Scene):
             # Keep Typst's imported fraction rule and native glyph styles.
             self.formulas[mode] = obj.move_to((0, 3.09, 0))
             badge = label(mode.title(), 19, YELLOW if mode in {'secant', 'limit'} else TEAL, 3.6)
-            self.modes[mode] = badge.move_to((7.1 - badge.width / 2, 3.55, 0))
+            self.modes[mode] = badge.move_to((6.6 - badge.width / 2, 3.55, 0))
         self.captions = {}
         for beat in self.plan['beats']:
             caption = beat.get('caption')
@@ -205,7 +205,7 @@ class LessonScene(Scene):
         if previous != text:
             obj = label(text, 20, color, 4) if text else None
             if obj is not None:
-                obj.move_to((edge * (-7.1 + obj.width / 2), y, 0))
+                obj.move_to((edge * (-6.6 + obj.width / 2), y, 0))
             self.readouts[key] = (text, obj)
         return obj
 
