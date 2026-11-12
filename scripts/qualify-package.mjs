@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { lstat, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdtemp, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve, sep } from 'node:path';
 import { bundleTestModule } from './bundle-test-module.mjs';
@@ -60,6 +60,26 @@ try {
   assert.ok(local, 'Expected a verified runtime prefix in the isolated data directory.');
   const env = environment(scratch, local.prefix);
   const bin = windows ? join(local.prefix, 'Library', 'bin') : join(local.prefix, 'bin');
+  const ffmpeg = join(bin, 'ffmpeg' + (windows ? '.exe' : ''));
+  const ffmpegMode = (await lstat(ffmpeg)).mode & 0o777;
+  if (!windows) {
+    await chmod(ffmpeg, 0o600);
+    try { status(false); }
+    finally { await chmod(ffmpeg, ffmpegMode); }
+  }
+  await rename(ffmpeg, `${ffmpeg}.verified`);
+  try {
+    status(false);
+    const altered = await readFile(`${ffmpeg}.verified`);
+    altered[0] ^= 1;
+    await writeFile(ffmpeg, altered, { flag: 'wx', mode: ffmpegMode });
+    status(false);
+  } finally {
+    await rm(ffmpeg, { force: true });
+    await rename(`${ffmpeg}.verified`, ffmpeg);
+  }
+  status(true);
+  console.log('Runtime readiness rejected missing, altered, and (on Unix) non-executable FFmpeg.');
   const media = (tool, args, minutes = 1) => run(join(bin, tool + (windows ? '.exe' : '')), args,
     scratch, env, AbortSignal.timeout(minutes * minute), tool);
 

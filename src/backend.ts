@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Type } from 'typebox';
 import type { PluginBackendModule, PluginModelSpec } from 'learnharness-plugin-api';
-import { Jobs, object, text } from './jobs';
+import { integer, Jobs, object, text } from './jobs';
 import { PLAN_BYTES } from './protocol';
 import type { DraftModel, Status } from './protocol';
 import { privateDirectory, Runtime } from './runtime';
@@ -26,9 +26,13 @@ export const activate: PluginBackendModule['activate'] = (ctx) => {
     await Promise.allSettled([jobs.dispose(), installation?.work]);
   });
 
-  ctx.cleanup(ctx.handle('status', async (): Promise<Status> => ({
-    ...await runtime.status(), install: installation?.progress ?? null, jobs: await jobs.views(),
-  })));
+  ctx.cleanup(ctx.handle('status', async (raw): Promise<Status> => {
+    const offset = raw === undefined ? 0 : integer(object(raw).offset, Number.MAX_SAFE_INTEGER);
+    const all = await jobs.views();
+    const saved = all.filter(job => job.saved);
+    return { ...await runtime.status(), install: installation?.progress ?? null, savedCount: saved.length,
+      jobs: [...all.filter(job => !job.saved), ...saved.slice(offset, offset + 12)] };
+  }));
   ctx.cleanup(ctx.handle('install', (raw) => {
     const { confirmed, narration, allowRuntime, allowVoice, setupKey } = object(raw);
     if (confirmed !== true) throw new Error('Confirm the local setup download first.');
@@ -38,7 +42,6 @@ export const activate: PluginBackendModule['activate'] = (ctx) => {
       throw new Error('Confirm the components shown for this narration option.');
     }
     const changed = 'The local setup changed. Check the updated download size and confirm it again.';
-    if (setupKey !== runtime.setupKey) throw new Error(changed);
     if (installation) throw new Error('An installation is already running.');
     ctx.signal.throwIfAborted();
     const abort = new AbortController();
@@ -48,6 +51,7 @@ export const activate: PluginBackendModule['activate'] = (ctx) => {
     installation = task;
     const progress = (message: string) => { task.progress = message; };
     task.work = (async () => {
+      if (setupKey !== await runtime.setupKey()) throw new Error(changed);
       if (!allowRuntime && !await runtime.ready()) throw new Error(changed);
       if (narration === 'automatic' && !allowVoice && !await runtime.hasVerifiedVoice(signal)) throw new Error(changed);
       if (allowRuntime) await runtime.install(signal, progress);

@@ -123,26 +123,33 @@ export class Jobs {
       try {
         const size = await this.runtime.render(job.folder, signal, job.narration);
         signal.throwIfAborted();
+        job.size = size;
         try {
-          await this.saved.keep(job.id, job.title ?? 'Manim lesson', join(job.folder, 'video.mp4'), signal);
+          await this.saved.keep(job.id, job.title ?? 'Manim lesson', join(job.folder, 'video.mp4'), signal, true);
           job.saved = true;
+          job.state = 'ready';
         }
         catch (error) {
           signal.throwIfAborted();
-          const message = (error as Error).message;
-          job.warning = message.startsWith('Recent lessons is full.') ? message :
-            'This video could not be kept in Manim. Save the MP4 before leaving.';
+          job.state = 'save-error';
+          clearTimeout(job.timer);
+          job.warning = `Could not add this video to Recent lessons. Export the MP4, or recover it from ${join(job.folder, 'video.mp4')}.`;
         }
-        job.size = size;
-        job.state = 'ready';
       } catch (error) {
         job.state = job.abort.signal.aborted ? 'cancelled' : 'failed';
         job.error = timeout.aborted ? 'Render exceeded 12 minutes.' : job.state === 'failed' ? (error as Error).message : undefined;
       } finally {
-        // Retain a temporary MP4 only if we could not keep the durable copy.
-        const entries = await readdir(job.folder);
-        await Promise.allSettled(entries.filter((path) => path !== 'video.mp4' || job.state !== 'ready' || job.saved)
-          .map((path) => rm(join(job.folder, path), { recursive: true, force: true })));
+        if (job.saved) {
+          // Finished jobs leave the active quota as soon as their durable copy exists.
+          clearTimeout(job.timer);
+          this.jobs.delete(job.id);
+          await rm(job.folder, { recursive: true, force: true }).catch(() => undefined);
+        } else {
+          // Retain a temporary MP4 only if we could not keep the durable copy.
+          const entries = await readdir(job.folder);
+          await Promise.allSettled(entries.filter((path) => path !== 'video.mp4' || job.state !== 'save-error')
+            .map((path) => rm(join(job.folder, path), { recursive: true, force: true })));
+        }
       }
     })();
   }
@@ -150,7 +157,9 @@ export class Jobs {
   async chunk(id: unknown, value: unknown) {
     if (typeof id !== 'string') throw new Error('Expected a lesson ID.');
     const job = this.jobs.get(id);
-    if (!job || job.saved || job.state !== 'ready') return this.saved.chunk(id, integer(value, Number.MAX_SAFE_INTEGER));
+    if (!job || job.saved || (job.state !== 'ready' && job.state !== 'save-error')) {
+      return this.saved.chunk(id, integer(value, Number.MAX_SAFE_INTEGER));
+    }
     if (!job.size) throw new Error('Video is still unavailable.');
     return readVideoChunk(join(job.folder, 'video.mp4'), job.size, integer(value, job.size - 1));
   }
@@ -162,16 +171,18 @@ export class Jobs {
     if (this.jobs.has(id)) await this.remove(id);
   }
 
-  async remove(id: unknown) {
+  async remove(id: unknown, preserveUnsaved = false) {
     const job = this.find(id);
     this.jobs.delete(job.id);
     clearTimeout(job.timer);
     job.abort.abort(new Error('Render cancelled.'));
     try { await job.work; }
-    finally { await rm(job.folder, { recursive: true, force: true }); }
+    finally {
+      if (!(preserveUnsaved && job.state === 'save-error')) await rm(job.folder, { recursive: true, force: true });
+    }
   }
 
   async dispose() {
-    await Promise.allSettled([...this.jobs.keys()].map((id) => this.remove(id)));
+    await Promise.allSettled([...this.jobs.keys()].map((id) => this.remove(id, true)));
   }
 }

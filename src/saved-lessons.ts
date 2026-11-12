@@ -1,13 +1,11 @@
 import { constants } from 'node:fs';
-import { copyFile, lstat, mkdtemp, open, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { copyFile, link, lstat, mkdtemp, open, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { CHUNK_BYTES, VIDEO_BYTES } from './protocol';
 import type { JobView } from './protocol';
 import { privateDirectory } from './runtime';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const maxLessons = 12;
-const maxLibraryBytes = 512 * 1024 * 1024;
 const maxMetadata = 1024;
 const safeTitle = (title: unknown): title is string => typeof title === 'string' &&
   title.trim().length > 0 && Buffer.byteLength(title) <= 360 && !/[\p{Cc}\p{Cf}\p{Cs}]/u.test(title);
@@ -15,6 +13,7 @@ const safeTitle = (title: unknown): title is string => typeof title === 'string'
 type Saved = JobView & { state: 'ready'; size: number; title: string; createdAt: number; saved: true };
 
 export class SavedLessons {
+  private cached?: { key: string; until: number; lessons: Saved[] };
   constructor(private readonly directory: string) {}
 
   private async read(id: string): Promise<Saved | undefined> {
@@ -31,44 +30,58 @@ export class SavedLessons {
           !Number.isSafeInteger(value.createdAt) || value.createdAt <= 0) return;
       return { id, size: video.size, title: value.title, createdAt: value.createdAt, state: 'ready', saved: true };
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
+      if (!['ENOENT', 'ENOTDIR', 'EACCES', 'EPERM'].includes((error as NodeJS.ErrnoException).code ?? '') &&
+          !(error instanceof SyntaxError)) throw error;
     }
   }
 
   async list(): Promise<Saved[]> {
     try {
-      if (!(await lstat(this.directory)).isDirectory()) return [];
+      const stat = await lstat(this.directory);
+      if (!stat.isDirectory()) return [];
+      const key = [stat.dev, stat.ino, stat.mtimeMs, stat.ctimeMs].join(':');
+      if (this.cached?.key === key && this.cached.until > Date.now()) return this.cached.lessons;
       const entries = (await readdir(this.directory, { withFileTypes: true }))
         .filter((entry) => entry.isDirectory() && uuid.test(entry.name));
-      if (entries.length > maxLessons) throw new Error('Saved lesson storage has too many entries.');
-      const lessons = await Promise.all(entries.map(({ name }) => this.read(name)));
-      return lessons.filter((lesson) => lesson !== undefined).sort((a, b) => b.createdAt - a.createdAt);
+      const lessons: Saved[] = [];
+      for (const { name } of entries) {
+        const lesson = await this.read(name);
+        if (lesson) lessons.push(lesson);
+      }
+      lessons.sort((a, b) => b.createdAt - a.createdAt);
+      this.cached = { key, until: Date.now() + 15_000, lessons };
+      return lessons;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       return [];
     }
   }
 
-  async keep(id: string, title: string, source: string, signal: AbortSignal) {
+  async keep(id: string, title: string, source: string, signal: AbortSignal, linkTemporary = false) {
     signal.throwIfAborted();
     const video = await lstat(source);
     if (!uuid.test(id) || !safeTitle(title) || !video.isFile() || video.size <= 0 || video.size > VIDEO_BYTES) {
       throw new Error('The finished video could not be kept in Manim.');
     }
     const root = await privateDirectory(this.directory);
-    const lessons = await this.list();
-    if (lessons.length >= maxLessons || lessons.reduce((bytes, lesson) => bytes + lesson.size, video.size) > maxLibraryBytes) {
-      throw new Error('Recent lessons is full. Save the MP4 or delete a saved lesson to free space.');
-    }
     const staging = await mkdtemp(join(root, '.saving-'));
+    const stagedVideo = join(staging, 'video.mp4');
     try {
-      await copyFile(source, join(staging, 'video.mp4'), constants.COPYFILE_EXCL);
       await writeFile(join(staging, 'lesson.json'), JSON.stringify({ id, title, size: video.size, createdAt: Date.now() }),
         { mode: 0o600, flag: 'wx' });
+      if (linkTemporary) {
+        // Keep the source available until publish succeeds, without duplicating its bytes on normal filesystems.
+        try { await link(source, stagedVideo); }
+        catch (error) {
+          if (!['EXDEV', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS', 'EPERM'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
+          await copyFile(source, stagedVideo, constants.COPYFILE_EXCL);
+        }
+      } else await copyFile(source, stagedVideo, constants.COPYFILE_EXCL);
       signal.throwIfAborted();
       await rename(staging, join(root, id));
+      this.cached = undefined;
     } finally {
-      await rm(staging, { recursive: true, force: true });
+      await rm(staging, { recursive: true, force: true }).catch(() => undefined);
     }
   }
 
@@ -81,6 +94,7 @@ export class SavedLessons {
   async delete(id: string) {
     if (!await this.read(id)) throw new Error('This saved lesson is unavailable.');
     await rm(join(this.directory, id), { recursive: true });
+    this.cached = undefined;
   }
 }
 

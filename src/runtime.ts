@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { createReadStream, createWriteStream } from 'node:fs';
-import { chmod, cp, glob, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises';
+import { constants, createReadStream, createWriteStream } from 'node:fs';
+import { access, chmod, cp, glob, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { get } from 'node:https';
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { Transform } from 'node:stream';
@@ -214,8 +214,12 @@ async function runtimeFile(prefix: string, path: string) {
 
 export class Runtime {
   private voiceInvalid = false;
-  readonly setupKey = [host, versions.manim, binary?.[3], voiceRelease, voiceDownloadMiB].join(':');
   constructor(private readonly assets: string, private readonly data: string) {}
+
+  async setupKey() {
+    return [binary ? (await this.paths()).id : host, voiceRelease, voiceRevision, voiceConfig.sha,
+      voiceBinary?.sha, voiceDownloadMiB].join(':');
+  }
 
   private async paths() {
     if (!binary) throw new Error('Runtime platform is unsupported.');
@@ -231,16 +235,29 @@ export class Runtime {
       if (!(await lstat(root)).isDirectory() || !(await lstat(join(root, readyFile))).isFile()) return null;
       const marker = JSON.parse(await readFile(join(root, readyFile), 'utf8'));
       if (!marker || typeof marker !== 'object') return null;
-      const { directory, lock, pythonSha } = marker;
+      const { directory, lock, pythonSha, ffmpegSha } = marker;
       if (lock !== id || !/^install-[a-zA-Z0-9]{6}$/.test(directory ?? '') || !/^[a-f0-9]{64}$/.test(pythonSha ?? '')) return null;
       const prefix = join(root, directory, 'env');
       if (!(await lstat(prefix)).isDirectory() || !(await lstat(dirname(prefix))).isDirectory()) return null;
       const python = await runtimeFile(prefix, pythonAt(prefix));
       if (await digest(python) !== pythonSha) return null;
-      await runtimeFile(prefix, ffmpegAt(prefix));
+      const ffmpeg = await runtimeFile(prefix, ffmpegAt(prefix));
+      if (!windows) {
+        await access(python, constants.X_OK);
+        await access(ffmpeg, constants.X_OK);
+      }
+      if (ffmpegSha !== undefined) {
+        if (!/^[a-f0-9]{64}$/.test(ffmpegSha) || await digest(ffmpeg) !== ffmpegSha) return null;
+      } else {
+        // Existing preview locks predate the FFmpeg hash. Mach-O relocation
+        // changes the hash by prefix; the pinned arm64 file length is stable.
+        const size = (await lstat(ffmpeg)).size;
+        if (size < 64 * 1024 || (process.platform === 'darwin' && size !== 426128)) return null;
+      }
       return { prefix, python };
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT' || error instanceof SyntaxError) return null;
+      if (['ENOENT', 'ENOTDIR', 'EACCES', 'EPERM'].includes((error as NodeJS.ErrnoException).code ?? '') ||
+          error instanceof SyntaxError || (error as Error).message === 'Runtime executable escapes the verified prefix.') return null;
       throw error;
     }
   }
@@ -248,7 +265,7 @@ export class Runtime {
   async status() {
     return { supported: Boolean(binary), platform: binary?.[0] ?? host,
       downloadMiB: binary?.[3] ?? null, ready: Boolean(await this.ready()), versions,
-      voiceReady: !this.voiceInvalid && Boolean(await this.voiceReady()), voiceDownloadMiB, setupKey: this.setupKey };
+      voiceReady: !this.voiceInvalid && Boolean(await this.voiceReady()), voiceDownloadMiB, setupKey: await this.setupKey() };
   }
 
   private async voiceReady(signal?: AbortSignal) {
@@ -383,7 +400,8 @@ export class Runtime {
       if (!media.startsWith('ffmpeg version 9.0.2 ')) throw new Error('Installed FFmpeg version does not match the lock.');
       const marker = join(folder, readyFile);
       // Windows can spell the same temp root with either an 8.3 alias or its long path.
-      await writeFile(marker, JSON.stringify({ directory: basename(folder), lock: id, pythonSha: await digest(python) }), { mode: 0o600 });
+      await writeFile(marker, JSON.stringify({ directory: basename(folder), lock: id, pythonSha: await digest(python),
+        ffmpegSha: await digest(ffmpeg) }), { mode: 0o600 });
       await rm(scratch, { recursive: true, force: true });
       signal.throwIfAborted();
       await rename(marker, join(canonicalRoot, readyFile));

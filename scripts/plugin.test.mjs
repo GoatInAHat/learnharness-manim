@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -58,7 +58,8 @@ test('standalone package extracts to the LearnHarness plugin layout and activate
   assert.throws(() => operations.get('install')({ confirmed: 'true', narration: 'automatic' }), /Confirm the local setup download/);
   assert.throws(() => operations.get('install')({ confirmed: true, narration: 'unexpected' }), /Select a narration option/);
   assert.throws(() => operations.get('install')({ confirmed: true, narration: 'silent', allowRuntime: false, allowVoice: true }), /Confirm the components/);
-  assert.throws(() => operations.get('install')({ confirmed: true, narration: 'automatic', allowRuntime: true, allowVoice: true, setupKey: 'stale' }), /setup changed/);
+  await assert.rejects(operations.get('install')({ confirmed: true, narration: 'automatic', allowRuntime: true,
+    allowVoice: true, setupKey: 'stale' }), /setup changed/);
   await assert.rejects(operations.get('install')({ confirmed: true, narration: 'automatic', allowRuntime: false,
     allowVoice: true, setupKey: status.setupKey }), /setup changed/);
   assert.deepEqual(await readdir(plugin), ['dist']);
@@ -74,11 +75,12 @@ test('completed lessons reopen after a new backend and disposing temporary jobs 
   } };
   const jobs = new Jobs(folder, runtime, signal);
   const ids = [];
-  for (const title of ['First lesson', 'Second lesson']) {
+  for (let n = 1; n <= 6; n++) {
+    const title = `Lesson ${n}`;
     const id = await jobs.create(JSON.stringify({ title }), 'silent');
     ids.push(id);
     jobs.start(id);
-    for (let i = 0; i < 100 && !jobs.list().some(j => j.id === id && j.state === 'ready'); i++) {
+    for (let i = 0; i < 100 && !(await jobs.views()).some(j => j.id === id && j.saved); i++) {
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
     assert.ok((await jobs.views()).some(j => j.id === id && j.saved));
@@ -93,13 +95,52 @@ test('completed lessons reopen after a new backend and disposing temporary jobs 
   await assert.rejects(reopened.chunk('../video.mp4', 0), /unavailable/);
   await assert.rejects(reopened.remove(ids[0]), /expired/);
   await reopened.deleteSaved(ids[0]);
-  assert.deepEqual((await reopened.views()).map(j => j.id), [ids[1]]);
+  assert.deepEqual(new Set((await reopened.views()).map(j => j.id)), new Set(ids.slice(1)));
   const saved = new SavedLessons(join(folder, 'saved'));
-  await assert.rejects(saved.keep(ids[1], 'Cannot overwrite', join(folder, 'saved', ids[1], 'video.mp4'), signal));
-  assert.equal((await saved.list())[0].title, 'Second lesson');
+  const retained = join(folder, 'saved', ids[1], 'video.mp4');
+  await assert.rejects(saved.keep(ids[1], 'Cannot overwrite', retained, signal, true));
+  assert.deepEqual(await readFile(retained), video);
+  assert.equal((await saved.list()).find(lesson => lesson.id === ids[1]).title, 'Lesson 2');
   const aborted = AbortSignal.abort(new Error('cancelled'));
   await assert.rejects(saved.keep(randomUUID(), 'Cancelled', join(folder, 'saved', ids[1], 'video.mp4'), aborted), /cancelled/);
-  assert.equal((await saved.list()).length, 1);
+  assert.equal((await saved.list()).length, 5);
+});
+
+test('malformed metadata does not hide healthy lessons and no prior lesson is evicted', async (t) => {
+  const folder = await scratch(t);
+  const directory = join(folder, 'saved');
+  const source = join(folder, 'fixture.mp4');
+  await writeFile(source, Buffer.from('small fixture'));
+  const malformed = join(directory, randomUUID());
+  await mkdir(malformed, { recursive: true });
+  await writeFile(join(malformed, 'lesson.json'), '{malformed');
+  const library = new SavedLessons(directory);
+  const signal = new AbortController().signal;
+  for (let n = 1; n <= 15; n++) await library.keep(randomUUID(), `Lesson ${n}`, source, signal);
+  assert.equal((await readdir(directory)).length, 16);
+  assert.equal((await library.list()).length, 15);
+});
+
+test('a storage error leaves the rendered video recoverable without calling it saved', async (t) => {
+  const folder = await scratch(t);
+  await writeFile(join(folder, 'saved'), 'Deliberately block the library directory');
+  const signal = new AbortController().signal;
+  const bytes = Buffer.from('rendered video');
+  const runtime = { ready: async () => true, validate: async () => {}, render: async (job) => {
+    await writeFile(join(job, 'video.mp4'), bytes);
+    return bytes.length;
+  } };
+  const jobs = new Jobs(folder, runtime, signal);
+  const id = await jobs.create('{"title":"Recoverable lesson"}', 'silent');
+  jobs.start(id);
+  for (let i = 0; i < 100 && jobs.list()[0].state === 'rendering'; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(jobs.list()[0].state, 'save-error');
+  assert.equal(await jobs.chunk(id, 0), bytes.toString('base64'));
+  await jobs.dispose();
+  const temp = (await readdir(folder)).find(name => name.startsWith('render-'));
+  assert.deepEqual(await readFile(join(folder, temp, 'video.mp4')), bytes);
 });
 
 test('job API caps UTF-8 plans, chunk ordering, and total WAV bytes, and cancels running work', async (t) => {

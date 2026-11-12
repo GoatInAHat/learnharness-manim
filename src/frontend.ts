@@ -135,6 +135,10 @@ export const activate: PluginFrontendModule['activate'] = (ctx) => {
     recentHeading.textContent = 'Recent lessons';
     const recent = document.createElement('ul');
     root.append(recentHeading, recent);
+    let savedOffset = 0;
+    const newer = button('Newer lessons', () => { savedOffset = Math.max(0, savedOffset - 12); return refresh(); });
+    const older = button('Older lessons', () => { savedOffset += 12; return refresh(); });
+    newer.hidden = older.hidden = true;
     const player = document.createElement('video');
     player.controls = true;
     player.preload = 'metadata';
@@ -227,14 +231,21 @@ export const activate: PluginFrontendModule['activate'] = (ctx) => {
       if (refreshing || signal.aborted) return;
       refreshing = true;
       try {
-        const status = await ctx.call<Status>('status');
-        if (signal.aborted) return;
+        const offset = savedOffset;
+        const status = await ctx.call<Status>('status', { offset });
+        if (signal.aborted || offset !== savedOffset) return;
+        if (offset && offset >= status.savedCount) {
+          savedOffset = Math.max(0, Math.floor((status.savedCount - 1) / 12) * 12);
+          return;
+        }
         current = status;
         runtimeLine.textContent = status.install || (!status.supported ? `Runtime unavailable for ${status.platform}.` :
           status.ready ? `Local Manim ${status.versions.manim} is ready.` : 'Set up local rendering to render or validate plans.');
         voiceLine.textContent = status.voiceReady ? 'Offline English narration is ready.' : status.voiceDownloadMiB ? '' :
           'Automatic narration is unavailable on this platform. Select Silent or WAV.';
         updateControls();
+        newer.hidden = offset === 0;
+        older.hidden = offset + 12 >= status.savedCount;
         const signature = JSON.stringify(status.jobs);
         if (jobSignature === signature) return;
         jobSignature = signature;
@@ -247,9 +258,8 @@ export const activate: PluginFrontendModule['activate'] = (ctx) => {
 
     function jobRow(job: JobView) {
       const row = document.createElement('li');
-      row.append(job.saved ? (job.title ?? 'Saved lesson') : job.error ? `Render failed. ${job.error}` :
-        `Render ${job.state}${job.warning ? `. ${job.warning}` : ''}`);
-      if (job.state === 'ready') button('Preview', () => preview(job), row);
+      row.append(job.saved ? (job.title ?? 'Saved lesson') : job.warning ?? (job.error ? `Render failed. ${job.error}` : `Render ${job.state}`));
+      if (job.state === 'ready' || job.state === 'save-error') button('Preview', () => preview(job), row);
       if (job.saved) {
         button('Delete saved lesson', async () => {
           await ctx.call('deleteSaved', { id: job.id });

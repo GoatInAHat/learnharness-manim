@@ -6,7 +6,7 @@ export type Narration = 'automatic' | 'silent' | 'wav';
 
 export interface JobView {
   id: string;
-  state: 'upload' | 'rendering' | 'ready' | 'failed' | 'cancelled';
+  state: 'upload' | 'rendering' | 'ready' | 'save-error' | 'failed' | 'cancelled';
   size?: number;
   error?: string;
   title?: string;
@@ -25,6 +25,7 @@ export interface Status {
   voiceDownloadMiB: number | null;
   setupKey: string;
   jobs: JobView[];
+  savedCount: number;
 }
 
 export interface DraftModel {
