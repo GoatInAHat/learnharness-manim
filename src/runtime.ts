@@ -234,7 +234,8 @@ export class Runtime {
     if (!binary) throw new Error('Runtime platform is unsupported.');
     const { lock, id, root } = await this.paths();
     const entries = packages(lock, binary[0]);
-    const folder = await mkdtemp(join(await privateDirectory(root), 'install-'));
+    const canonicalRoot = await privateDirectory(root);
+    const folder = await mkdtemp(join(canonicalRoot, 'install-'));
     const scratch = join(folder, 'bootstrap');
     const prefix = join(folder, 'env');
     const launcher = join(scratch, windows ? 'micromamba.exe' : 'micromamba');
@@ -281,10 +282,11 @@ export class Runtime {
       const media = await run(ffmpeg, ['-version'], scratch, environment(scratch, prefix), signal, 'FFmpeg verification');
       if (!media.startsWith('ffmpeg version 9.0.2 ')) throw new Error('Installed FFmpeg version does not match the lock.');
       const marker = join(folder, readyFile);
-      await writeFile(marker, JSON.stringify({ directory: relative(root, folder), lock: id, pythonSha: await digest(python) }), { mode: 0o600 });
+      // Windows can spell the same temp root with either an 8.3 alias or its long path.
+      await writeFile(marker, JSON.stringify({ directory: basename(folder), lock: id, pythonSha: await digest(python) }), { mode: 0o600 });
       await rm(scratch, { recursive: true, force: true });
       signal.throwIfAborted();
-      await rename(marker, join(root, readyFile));
+      await rename(marker, join(canonicalRoot, readyFile));
       committed = true;
     } catch (error) {
       signal.throwIfAborted();
