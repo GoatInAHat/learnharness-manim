@@ -2,9 +2,11 @@
 
 Manim Explainer renders calculus lessons as local MP4s. It takes a [semantic math scene v3 plan](contract/semantic-math-v3.md) and an optional cue-aligned narration WAV. The lesson renderer uses Manim Community, Cairo and Typst. You can also draft a plan with a model available in LearnHarness.
 
+This is a source preview. The macOS Apple Silicon runtime and packaged renderer have been exercised locally; see the qualification workflow for Windows and Linux results.
+
 ## Install and render
 
-1. Download `manim-explainer.zip` from this repository's Releases. Open **Settings → Community plugins** in LearnHarness 0.6.0 or later and copy the plugins directory path.
+1. Build `manim-explainer.zip` using the commands below. Open **Settings → Community plugins** in LearnHarness 0.6.0 or later and copy the plugins directory path.
 2. Extract the ZIP there so that `<plugins directory>/manim-explainer/dist/manifest.json` exists. Refresh the plugin list and enable **Manim Explainer**. When upgrading, replace the plugin's `dist/` folder and restart LearnHarness. The sibling `data/` folder holds the installed runtime.
 3. Open **Manim Explainer** from the sidebar. Check the download consent box and select **Install local runtime**. The view shows download verification and installation progress and offers cancellation. Later renders reuse the runtime.
 4. Import or paste a plan, optionally attach a mono PCM16 WAV at 16–48 kHz padded to the full lesson and aligned to the plan's cues, and select **Render offline**. Select **Preview** to play the result or **Save MP4** to keep a copy. Renders without WAV input are silent. Temporary jobs expire after 30 minutes.
