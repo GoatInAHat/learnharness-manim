@@ -15,7 +15,7 @@ sys.path[:0] = [sys.argv[1], str(Path(__file__).resolve().parent)]
 from fixture import fixture
 from plan import PlanError, load, value_and_derivative
 from scene import PINK, PLOT_MAX, PLOT_MIN, LessonScene, Timeline, narration_at
-from semantic import FPS, MAX_PLAN, compile_frame, validate
+from semantic import FPS, MAX_PLAN, compile_frame, graph_ast, validate
 
 ROOT = Path(sys.argv[2])
 
@@ -149,17 +149,67 @@ class NativeTests(unittest.TestCase):
             'op': 'piecewise', 'at': 0,
             'before': smooth(-2), 'after': binary('add', num(1), smooth(0)),
         }
-        expr = validate(raw)['expr']
-        self.assertAlmostEqual(value_and_derivative(expr, -2)[0], 0)
-        self.assertAlmostEqual(value_and_derivative(expr, 0)[0], 1)
-        self.assertAlmostEqual(value_and_derivative(expr, 2)[0], 2)
+        raw['beats'][3]['a'] = 0
+        plan = validate(raw)
+        expr = plan['expr']
+        self.assertEqual(value_and_derivative(expr, -2)[0], 0)
+        self.assertEqual(value_and_derivative(expr, 0)[0], 1)
+        self.assertEqual(value_and_derivative(expr, 2)[0], 2)
         endpoint = 1 / (1 + math.exp(3.5))
         expected = 3.5 * endpoint * (1 - endpoint) / (1 - 2 * endpoint)
         self.assertAlmostEqual(value_and_derivative(expr, 0)[1], expected)
         self.assertAlmostEqual(value_and_derivative(expr, -1e-8)[1], expected)
-        raw['graph']['expression']['after'] = {'op': 'x'}
-        with self.assertRaisesRegex(PlanError, 'must match'):
-            validate(raw)
+        tangent = compile_frame(plan, 1680)
+        self.assertEqual(tangent['lineKind'], 'tangent')
+        self.assertEqual(tangent['p'], tangent['q'])
+        for h in (-1e-13, 1e-13):
+            plan['beats'][3].update(h=h, display='secant')
+            secant = compile_frame(plan, 1680)
+            self.assertEqual(secant['lineKind'], 'secant')
+            self.assertEqual(secant['q'][0], h)
+            self.assertAlmostEqual(secant['slope'], expected, delta=1e-12)
+
+        x = {'op': 'x'}
+        for after in (binary('add', x, num(1e-9)), binary('multiply', x, num(1.000000001))):
+            bad = dict(op='piecewise', at=0, before=x, after=after)
+            raw['graph']['expression'] = bad
+            with self.subTest(after=after), self.assertRaisesRegex(PlanError, 'must match'):
+                validate(raw)
+            with self.assertRaisesRegex(PlanError, 'must match'):
+                value_and_derivative(graph_ast(bad), 0)
+
+    def test_smooth_endpoints_are_exact_and_tails_stay_analytic(self):
+        x = {'op': 'x'}
+        smooth = graph_ast(dict(op='smooth', input=x, steepness=10))
+        lo, dlo = value_and_derivative(smooth, 0)
+        hi, dhi = value_and_derivative(smooth, 1)
+        self.assertEqual((lo, hi), (0, 1))
+        self.assertEqual(dlo, dhi)
+        below, dbelow = value_and_derivative(smooth, -0.2)
+        above, dabove = value_and_derivative(smooth, 1.2)
+        self.assertTrue(below < 0 and above > 1 and dbelow > 0 and dabove > 0)
+        with self.assertRaisesRegex(PlanError, 'operator'):
+            graph_ast(dict(op='clamp', input=x, min=0, max=1))
+
+    def test_frame_points_stay_within_the_closed_domain(self):
+        raw = copy.deepcopy(self.raw)
+        raw['beats'][0].update(a=-2, h=4, camera=dict(x=0, y=2, width=6, height=8))
+        plan = validate(raw)
+        edge = compile_frame(plan, 0)
+        self.assertEqual((edge['p'][0], edge['q'][0]), (-2, 2))
+        for a, h in ((-2.01, 1), (-2, -0.01), (0, 2.01)):
+            raw['beats'][0].update(a=a, h=h)
+            plan['beats'][0].update(a=a, h=h)
+            with self.subTest(a=a, h=h), self.assertRaisesRegex(PlanError, 'within the graph domain'):
+                validate(raw)
+            with self.assertRaisesRegex(PlanError, 'within the graph domain'):
+                compile_frame(plan, 0)
+        raw['graph'].update(domain=[-2, 0.11], expression={'op': 'x'})
+        for beat in raw['beats']:
+            beat.update(a=0.1, h=0.01 if beat['h'] else 0,
+                        camera=dict(x=0, y=0, width=4, height=4))
+        held_edge = compile_frame(validate(raw), raw['beats'][1]['startFrame'] + 4)
+        self.assertEqual(held_edge['q'][0], 0.11)
 
     def test_import_rejects_untrusted_code_fields_and_malformed_data(self):
         plan_path = ROOT / 'import.json'

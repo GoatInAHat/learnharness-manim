@@ -4,11 +4,11 @@ The companion JSON Schema describes input shape. Renderers also enforce the rule
 
 ## Graph and line
 
-The domain is an ordered pair of x coordinates. Each expression is at most 64 nodes and eight levels deep, with a root at level one. Only the root may be piecewise. Its breakpoint is interior, the before branch applies to x < at, and the after branch applies at equality. The branches must match in value and first derivative at the breakpoint (relative tolerance 1e−8 with an absolute floor of 1e−8). All rendered values and slopes must be finite and have magnitude at most 1e6.
+The domain is an ordered pair of x coordinates. Each expression is at most 64 nodes and eight levels deep, with a root at level one. Only the root may be piecewise. Its breakpoint is interior, the before branch applies to x < at, and the after branch applies at equality. A join passes only when both branches evaluate to exactly the same finite value and first derivative at the breakpoint in binary64 arithmetic. Algebraically equal branches can be rejected if rounding gives different results. All rendered values and slopes must be finite and have magnitude at most 1e6.
 
-Use the usual arithmetic and analytic differentiation rules. The x node is the independent variable, even when its printed name is t. A smooth node with steepness k and input u returns [sigmoid(k(u−1/2))−sigmoid(−k/2)]/[1−2 sigmoid(−k/2)]. Differentiate analytically through its input. This is an affine-normalized logistic, without clamping outside [0,1]. Multiplication by a reciprocal expresses scaling or division by a constant.
+Use the usual arithmetic and analytic differentiation rules. The x node is the independent variable, even when its printed name is t. A smooth node with steepness k and input u returns [sigmoid(k(u−1/2))−sigmoid(−k/2)]/[1−2 sigmoid(−k/2)], with exact results 0 at u = 0 and 1 at u = 1. Use a sign-symmetric logistic derivative and apply the chain rule through the input. This is an affine-normalized logistic, without clamping outside [0,1]. Multiplication by a reciprocal expresses scaling or division by a constant.
 
-At each frame P = (a,f(a)) and Q = (a+h,f(a+h)). A nonzero h is always a secant with slope (f(a+h)−f(a))/h, including when Q is visually close to P. A zero h means exact Q=P, no quotient evaluation, and the analytic tangent slope f′(a). At authored keyframes, a nonzero |h| is at least 0.0001. Consecutive nonzero h values cannot change sign. P, Q and any reference lie within the domain.
+At each frame P = (a,f(a)) and Q = (a+h,f(a+h)). A nonzero h is always a secant with slope (f(a+h)−f(a))/h, including when Q is visually close to P. A zero h means exact Q=P, no quotient evaluation, and the analytic tangent slope f′(a). At authored keyframes, a nonzero |h| is at least 0.0001. Consecutive nonzero h values cannot change sign. P, Q and any reference must lie within the closed domain at every frame.
 
 ## Timeline
 

@@ -52,15 +52,23 @@ def value_and_derivative(node, x):
         return x, 1.0
     if op == 'piece':
         at, before, after = args
-        return value_and_derivative(before if x < at else after, x)
+        if x < at:
+            return value_and_derivative(before, x)
+        right = value_and_derivative(after, x)
+        if x == at:
+            left = value_and_derivative(before, x)
+            require(right == left and all(map(math.isfinite, right)),
+                    'Piecewise value and first derivative must match at the breakpoint.')
+        return right
     left, dl = value_and_derivative(args[0], x)
     if op == 'smooth':
         factor = args[1]
         exponent = factor * (left - 0.5)
-        logistic = sigmoid(exponent)
         first = sigmoid(-factor / 2)
         scale = 1 - 2 * first
-        return (logistic - first) / scale, factor * logistic * sigmoid(-exponent) * dl / scale
+        tail = sigmoid(-abs(exponent))
+        normalized = left if left in (0, 1) else (sigmoid(exponent) - first) / scale
+        return normalized, factor * (tail * (1 - tail)) * dl / scale
     if op == 'pow':
         exponent = args[1]
         return left ** exponent, exponent * left ** (exponent - 1) * dl
@@ -86,14 +94,12 @@ def small_rise(node, a, h):
         return h
     if op == 'piece':
         at, before, after = args
-        if h < 0:
-            return -small_rise(node, b, -h)
-        if b < at:
-            return small_rise(before, a, h)
-        if a >= at:
-            return small_rise(after, a, h)
-        jump = value_and_derivative(after, at)[0] - value_and_derivative(before, at)[0]
-        return small_rise(before, a, at - a) + jump + small_rise(after, at, b - at)
+        first, second = (before, after) if a < at else (after, before)
+        to_join = at - a
+        if (a < at and h <= to_join) or (a >= at and h >= to_join):
+            return small_rise(first, a, h)
+        # Preserve the signed run when a + h has rounded near the join.
+        return small_rise(first, a, to_join) + small_rise(second, at, h - to_join)
     rise = small_rise(args[0], a, h)
     if op == 'add':
         return rise + small_rise(args[1], a, h)

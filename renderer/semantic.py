@@ -107,8 +107,10 @@ def compile_frame(plan, frame: int) -> Frame:
         previous = plan['beats'][index - 1]
         u = (frame - beat['startFrame']) / (beat['settleFrame'] - beat['startFrame'])
         w = u * u * (3 - 2 * u)
-        a = (1 - w) * previous['a'] + w * a
-        h = (1 - w) * previous['h'] + w * h
+        if a != previous['a']:
+            a = (1 - w) * previous['a'] + w * a
+        if h != previous['h']:
+            h = (1 - w) * previous['h'] + w * h
         px, py, pw, ph = previous['camera']
         cx, cy, cw, ch = camera
         camera = ((1 - w) * px + w * cx, (1 - w) * py + w * cy,
@@ -116,9 +118,11 @@ def compile_frame(plan, frame: int) -> Frame:
                   math.exp((1 - w) * math.log(ph) + w * math.log(ch)))
         display = previous['display'] if compatible(previous['display'], h) else 'points'
     expr = plan['expr']
-    y, derivative = value_and_derivative(expr, a)
     q = a + h
+    lo, hi = plan['domain']
+    require(lo <= a <= hi and lo <= q <= hi, 'Points must be within the graph domain.')
     require(h == 0 or q != a, 'A nonzero interval must have distinct x coordinates.')
+    y, derivative = value_and_derivative(expr, a)
     next_y, next_derivative = value_and_derivative(expr, q) if h else (y, derivative)
     rise = next_y - y
     if h and abs(rise) < 1e-8 * max(1, abs(y), abs(next_y)):
@@ -153,12 +157,9 @@ def validate(raw):
     unit = line(graph['slopeUnit'], 14) if 'slopeUnit' in graph else None
     expr = graph_ast(graph['expression'])
     if expr[0] == 'piece':
-        _, point, before, after = expr
+        point = expr[1]
         require(start < point < end, 'Piecewise breakpoint must lie inside the domain.')
-        first, second = value_and_derivative(before, point), value_and_derivative(after, point)
-        require(all(math.isclose(a, b, rel_tol=1e-8, abs_tol=1e-8) for a, b in zip(first, second)),
-                'Piecewise value and first derivative must match at the breakpoint.')
-        bounded(*first, *second)
+        bounded(*value_and_derivative(expr, point))
     samples = []
     for i in range(601):
         x = start + (end - start) * i / 600
