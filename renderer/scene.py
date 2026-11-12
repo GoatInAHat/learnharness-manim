@@ -17,7 +17,7 @@ from manim import (
 # Isolated Python omits the script directory. This path is trusted packaged code.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from plan import PlanError, load, require, value_and_derivative
-from semantic import DISPLAYS, FPS, MAX_PLAN, Frame, compile_frame, validate
+from semantic import DISPLAYS, FPS, MAX_PLAN, Frame, compile_frame, narration_windows, validate
 
 BACKGROUND = '#111827'
 PAPER = '#F8FAFC'
@@ -336,10 +336,9 @@ def narration_at(job, plan):
         return max(max(segment, default=0), -min(segment, default=0))
 
     previous_end = 0
-    ends = [*plan['starts'][1:], plan['duration'] * FPS]
-    for index, (beat, end_frame) in enumerate(zip(plan['beats'], ends), 1):
-        start = (beat['cueFrame'] * rate + FPS // 2) // FPS
-        end = ((end_frame - 9) * rate + FPS // 2) // FPS
+    for index, (cue, end_frame) in enumerate(narration_windows(plan), 1):
+        start = (cue * rate + FPS // 2) // FPS
+        end = (end_frame * rate + FPS // 2) // FPS
         require(peak(previous_end, start) <= 100, 'Narration WAV has audio outside its cue windows.')
         require(peak(start, end) >= 16, f'Narration WAV is silent at beat {index}.')
         previous_end = end
@@ -353,9 +352,10 @@ def narration_at(job, plan):
     return normalized
 
 
-def render(job, height):
+def render(job, height, with_audio):
     plan = load(job / 'plan.json', validate, MAX_PLAN)
-    narration_at(job, plan)
+    if with_audio:
+        require(narration_at(job, plan) is not None, 'Expected a cue-aligned narration WAV.')
     with tempconfig({
         'renderer': 'cairo', 'format': 'mp4', 'output_file': 'video', 'media_dir': str(job / 'media'),
         'video_dir': str(job), 'pixel_width': height * 16 // 9, 'pixel_height': height, 'frame_rate': FPS,
@@ -369,7 +369,8 @@ def render(job, height):
 if __name__ == '__main__':
     try:
         require(sys.argv[2] in {'720', '1080'}, 'Unsupported render resolution.')
-        render(Path(sys.argv[1]).resolve(), int(sys.argv[2]))
+        require(sys.argv[3] in {'wav', 'silent'}, 'Unsupported narration option.')
+        render(Path(sys.argv[1]).resolve(), int(sys.argv[2]), sys.argv[3] == 'wav')
     except PlanError as error:
         print(str(error), file=sys.stderr)
         sys.exit(2)

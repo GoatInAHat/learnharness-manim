@@ -1,6 +1,6 @@
 import type { PluginFrontendModule } from 'learnharness-plugin-api';
 import { CHUNK_BYTES, PLAN_BYTES, VIDEO_BYTES, WAV_BYTES } from './protocol';
-import type { DraftModel, JobView, Status } from './protocol';
+import type { DraftModel, JobView, Narration, Status } from './protocol';
 
 export const activate: PluginFrontendModule['activate'] = (ctx) => {
   ctx.cleanup(ctx.registerView({ id: 'explainer', name: 'Manim Explainer', mount }));
@@ -17,13 +17,16 @@ export const activate: PluginFrontendModule['activate'] = (ctx) => {
     const installNote = field(consent, '');
     const downloadNote = document.createElement('span');
     installNote.append(downloadNote);
-    const install = button('Install local runtime', async () => {
+    const install = button('Set up local rendering', async () => {
       install.disabled = true;
-      try { await ctx.call('install', { confirmed: consent.checked }); }
+      const confirmed = consent.checked;
+      consent.checked = false;
+      try { await ctx.call('install', { confirmed, narration: narration.value }); }
       finally { if (!signal.aborted) await refresh(); }
     });
     consent.addEventListener('change', updateControls);
     const cancelInstall = button('Cancel installation', () => ctx.call('cancelInstall'));
+    const voiceLine = paragraph('Checking offline voice…');
     const planFile = document.createElement('input');
     planFile.type = 'file';
     planFile.accept = '.json,application/json';
@@ -33,12 +36,19 @@ export const activate: PluginFrontendModule['activate'] = (ctx) => {
     const audio = document.createElement('input');
     audio.type = 'file';
     audio.accept = '.wav,audio/wav';
+    const narration = document.createElement('select');
+    narration.add(new Option('Automatic offline voice (English)', 'automatic'));
+    narration.add(new Option('Silent video', 'silent'));
+    narration.add(new Option('Use a cue-aligned WAV', 'wav'));
     const importBox = document.createElement('section');
     importBox.className = 'lh-manim-panel';
     root.append(importBox);
     field(planFile, 'Import semantic math plan v3', importBox);
     field(plan, 'Lesson plan JSON', importBox);
-    field(audio, 'Optional narration WAV', importBox);
+    field(narration, 'Narration', importBox);
+    const audioField = field(audio, 'Narration WAV', importBox);
+    narration.addEventListener('change', () => { consent.checked = false; updateControls(); });
+    audio.addEventListener('change', updateControls);
     planFile.addEventListener('change', () => report(async () => {
       const file = planFile.files?.[0];
       if (!file) return;
@@ -50,13 +60,15 @@ export const activate: PluginFrontendModule['activate'] = (ctx) => {
     }));
     plan.addEventListener('input', updateControls);
     const render = button('Render offline', async () => {
-      const file = audio.files?.[0];
+      const mode = narration.value as Narration;
+      const file = mode === 'wav' ? audio.files?.[0] : undefined;
+      if (mode === 'wav' && !file) throw new Error('Attach a cue-aligned WAV before rendering.');
       if (file && (!file.size || file.size > WAV_BYTES)) throw new Error('Narration WAV exceeds 12 MiB or is empty.');
       submitting = true;
       updateControls();
       let id: string | undefined;
       try {
-        id = await ctx.call<string>('create', { plan: plan.value });
+        id = await ctx.call<string>('create', { plan: plan.value, narration: mode });
         for (let offset = 0; file && offset < file.size; offset += CHUNK_BYTES) {
           signal.throwIfAborted();
           const bytes = new Uint8Array(await file.slice(offset, offset + CHUNK_BYTES).arrayBuffer());
@@ -180,11 +192,23 @@ export const activate: PluginFrontendModule['activate'] = (ctx) => {
     }
 
     function updateControls() {
-      installNote.hidden = !current?.supported || current.ready || Boolean(current.install);
+      const automatic = narration.value === 'automatic';
+      const needsRuntime = current?.supported && !current.ready;
+      const needsVoice = automatic && Boolean(current?.voiceDownloadMiB) && !current?.voiceReady;
+      const runtimeMiB = needsRuntime ? current?.downloadMiB ?? 0 : 0;
+      const voiceMiB = needsVoice ? current?.voiceDownloadMiB ?? 0 : 0;
+      const downloads = [needsRuntime && 'Manim runtime', needsVoice && 'offline English voice'].filter(Boolean).join(' and ');
+      const avx = needsVoice && current?.platform.endsWith('-64') ? ' The voice needs AVX2.' : '';
+      const glibc = needsVoice && current?.platform === 'linux-64' ? ' The voice needs glibc 2.34 or newer.' : '';
+      downloadNote.textContent = `Allow the ${downloads} download (approximately ${runtimeMiB + voiceMiB} MiB).${avx}${glibc}`;
+      installNote.hidden = !current?.supported || !(needsRuntime || needsVoice) || Boolean(current.install);
       install.hidden = installNote.hidden;
       install.disabled = install.hidden || !consent.checked;
       cancelInstall.hidden = !current?.install;
-      render.disabled = !current?.ready || !plan.value.trim() || submitting || current.jobs.some((job) => job.state === 'rendering');
+      narration.disabled = Boolean(current?.install);
+      audioField.hidden = narration.value !== 'wav';
+      render.disabled = !current?.ready || Boolean(current.install) || !plan.value.trim() || submitting || current.jobs.some((job) => job.state === 'rendering') ||
+        (automatic && !current.voiceReady) || (narration.value === 'wav' && !audio.files?.[0]);
       draft.disabled = !current?.ready || Boolean(drafting) || !brief.value.trim() || !picker.value;
       cancelDraft.hidden = !drafting;
     }
@@ -196,9 +220,10 @@ export const activate: PluginFrontendModule['activate'] = (ctx) => {
         const status = await ctx.call<Status>('status');
         if (signal.aborted) return;
         current = status;
-        downloadNote.textContent = `Allow the pinned runtime download (approximately ${status.downloadMiB} MiB).`;
         runtimeLine.textContent = status.install || (!status.supported ? `Runtime unavailable for ${status.platform}.` :
-          status.ready ? `Local Manim ${status.versions.manim} is ready.` : `Install Manim ${status.versions.manim} to render or validate plans.`);
+          status.ready ? `Local Manim ${status.versions.manim} is ready.` : 'Set up local rendering to render or validate plans.');
+        voiceLine.textContent = status.voiceReady ? 'Offline English narration is ready.' : status.voiceDownloadMiB ? '' :
+          'Automatic narration is unavailable on this platform. Select Silent or WAV.';
         updateControls();
         const signature = JSON.stringify(status.jobs);
         if (jobSignature === signature) return;

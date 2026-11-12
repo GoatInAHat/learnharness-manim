@@ -224,9 +224,20 @@ def validate(raw):
     return plan
 
 
+def narration_windows(plan):
+    ends = [*plan['starts'][1:], plan['duration'] * FPS]
+    return [(beat['cueFrame'], end - 9) for beat, end in zip(plan['beats'], ends)]
+
+
 if __name__ == '__main__':
     try:
-        load(sys.argv[1], validate, MAX_PLAN)
-        print(json.dumps({'valid': True}))
+        plan = load(sys.argv[1], validate, MAX_PLAN)
+        result = {'valid': True}
+        if sys.argv[2:] == ['--narration']:
+            result.update(duration=plan['duration'] * FPS, beats=[
+                [beat['narration'], cue, end]
+                for beat, (cue, end) in zip(plan['beats'], narration_windows(plan))
+            ])
+        print(json.dumps(result))
     except PlanError as error:
         print(json.dumps({'valid': False, 'message': str(error)}))

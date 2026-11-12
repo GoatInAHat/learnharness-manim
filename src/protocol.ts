@@ -2,6 +2,7 @@ export const PLAN_BYTES = 64 * 1024;
 export const WAV_BYTES = 12 * 1024 * 1024;
 export const VIDEO_BYTES = 96 * 1024 * 1024;
 export const CHUNK_BYTES = 192 * 1024;
+export type Narration = 'automatic' | 'silent' | 'wav';
 
 export interface JobView {
   id: string;
@@ -17,6 +18,8 @@ export interface Status {
   downloadMiB: number | null;
   versions: { python: string; manim: string; typst: string };
   install: string | null;
+  voiceReady: boolean;
+  voiceDownloadMiB: number | null;
   jobs: JobView[];
 }
 

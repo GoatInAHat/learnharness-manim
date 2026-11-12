@@ -26,4 +26,5 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run package
-      - run: node scripts/qualify-package.mjs
+      - name: Qualify package and automatic narrated render
+        run: node scripts/qualify-package.mjs

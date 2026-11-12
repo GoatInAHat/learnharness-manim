@@ -26,10 +26,11 @@ async function copyBounded(source: string, destination: string, limit: number) {
 
 async function main(args: string[]) {
   const [command, root, plan, output, wav, extra] = args;
-  if (!root || extra || !((command === 'status' && !plan) || (command === 'install' && plan === '--allow-download' && !output) ||
+  if (!root || extra || !((command === 'status' && !plan) ||
+      ((command === 'install' || command === 'install-voice') && plan === '--allow-download' && !output) ||
       (command === 'validate' && plan && !output) || (command === 'render' && plan && output) ||
       (command === 'compare' && plan && output && wav))) {
-    throw new Error('Usage: cli.cjs status DATA | install DATA --allow-download | validate DATA PLAN.json | render DATA PLAN.json OUTPUT.mp4 [NARRATION.wav] | compare DATA PLAN.json OUTPUT.mp4 NARRATION.wav');
+    throw new Error('Usage: cli.cjs status DATA | install DATA --allow-download | install-voice DATA --allow-download | validate DATA PLAN.json | render DATA PLAN.json OUTPUT.mp4 [--silent | NARRATION.wav] | compare DATA PLAN.json OUTPUT.mp4 NARRATION.wav');
   }
   const runtime = new Runtime(__dirname, resolve(root));
   if (command === 'status') {
@@ -46,6 +47,11 @@ async function main(args: string[]) {
       console.log('Runtime ready.');
       return;
     }
+    if (command === 'install-voice') {
+      await runtime.installVoice(AbortSignal.any([abort.signal, AbortSignal.timeout(20 * 60 * 1000)]), (progress) => console.log(progress));
+      console.log('Offline voice ready.');
+      return;
+    }
     if (!await runtime.ready()) throw new Error('Install the pinned runtime before importing a plan.');
     const scratch = await mkdtemp(join(await privateDirectory(join(resolve(root), 'cli-jobs')), 'render-'));
     try {
@@ -56,8 +62,9 @@ async function main(args: string[]) {
         console.log('Plan valid.');
         return;
       }
-      if (wav) await copyBounded(wav, join(scratch, 'narration.wav'), WAV_BYTES);
-      await runtime.render(scratch, signal, command === 'compare' ? 1080 : 720);
+      const narration = command === 'render' && wav === '--silent' ? 'silent' : wav ? 'wav' : 'automatic';
+      if (narration === 'wav') await copyBounded(wav, join(scratch, 'narration.wav'), WAV_BYTES);
+      await runtime.render(scratch, signal, narration, command === 'compare' ? 1080 : 720);
       signal.throwIfAborted();
       // A private, exclusive output stays private even under a permissive umask.
       await copyFile(join(scratch, 'video.mp4'), resolve(output), constants.COPYFILE_EXCL);

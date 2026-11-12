@@ -7,10 +7,11 @@ export const pluginId = 'manim-explainer';
 export const staticFiles = [
   ...['manifest.json', 'LICENSE', 'NOTICE', 'styles.css'].map((path) => [path, path]),
   ['node_modules/typebox/license', 'TYPEBOX-LICENSE'],
+  ['runtime/voice/POCKET-TTS-LICENSE', 'POCKET-TTS-LICENSE'],
   ...[
     'renderer/scene.py', 'renderer/plan.py', 'renderer/semantic.py',
     'contract/semantic-math-v3.md', 'contract/semantic-math-v3.schema.json',
-    'runtime/osx-arm64.tsv', 'runtime/linux-64.tsv', 'runtime/win-64.tsv',
+    'runtime/osx-arm64.tsv', 'runtime/linux-64.tsv', 'runtime/win-64.tsv', 'runtime/voice/english.yaml',
   ].map((path) => [path, `assets/${path}`]),
 ];
 export const packageFiles = ['main.js', 'backend.cjs', 'cli.cjs', ...staticFiles.map(([, target]) => target)];

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { appendFile, mkdtemp, open, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { CHUNK_BYTES, PLAN_BYTES, WAV_BYTES } from './protocol';
-import type { JobView } from './protocol';
+import type { JobView, Narration } from './protocol';
 import { privateDirectory, Runtime } from './runtime';
 
 const lifetime = 30 * 60 * 1000;
@@ -25,6 +25,7 @@ export function integer(raw: unknown, max: number) {
 
 interface Job extends JobView {
   folder: string;
+  narration: Narration;
   timer: ReturnType<typeof setTimeout>;
   audioSize: number;
   writing: boolean;
@@ -48,8 +49,9 @@ export class Jobs {
     return job;
   }
 
-  async create(plan: unknown) {
+  async create(plan: unknown, narration: unknown = 'automatic') {
     const input = text(plan, PLAN_BYTES);
+    if (narration !== 'automatic' && narration !== 'silent' && narration !== 'wav') throw new Error('Unknown narration option.');
     if (this.jobs.size + this.starting >= 5) throw new Error('Delete an earlier render before starting another job.');
     this.starting++;
     let folder: string | undefined;
@@ -63,7 +65,7 @@ export class Jobs {
       const id = randomUUID();
       const timer = setTimeout(() => { void this.remove(id).catch(() => undefined); }, lifetime);
       timer.unref();
-      this.jobs.set(id, { id, state: 'upload', folder, timer, abort: new AbortController(), audioSize: 0, writing: false });
+      this.jobs.set(id, { id, state: 'upload', folder, narration, timer, abort: new AbortController(), audioSize: 0, writing: false });
       folder = undefined;
       return id;
     } finally {
@@ -74,6 +76,7 @@ export class Jobs {
 
   async upload(id: unknown, offset: unknown, raw: unknown) {
     const job = this.find(id);
+    if (job.narration !== 'wav') throw new Error('Select the WAV narration option before uploading.');
     if (job.state !== 'upload' || job.writing || integer(offset, WAV_BYTES) !== job.audioSize) throw new Error('Audio upload is out of sequence.');
     const encoded = text(raw, CHUNK_BYTES * 4 / 3);
     const bytes = Buffer.from(encoded, 'base64');
@@ -98,6 +101,7 @@ export class Jobs {
   start(id: unknown) {
     const job = this.find(id);
     if (job.state !== 'upload' || job.writing) throw new Error('The job is already running or its audio is still uploading.');
+    if (job.narration === 'wav' && !job.audioSize) throw new Error('Attach a cue-aligned WAV before rendering.');
     if ([...this.jobs.values()].some(({ state }) => state === 'rendering')) throw new Error('One render can run at a time.');
     this.signal.throwIfAborted();
     job.state = 'rendering';
@@ -105,7 +109,7 @@ export class Jobs {
     const signal = AbortSignal.any([this.signal, job.abort.signal, timeout]);
     job.work = (async () => {
       try {
-        const size = await this.runtime.render(job.folder, signal);
+        const size = await this.runtime.render(job.folder, signal, job.narration);
         signal.throwIfAborted();
         job.size = size;
         job.state = 'ready';

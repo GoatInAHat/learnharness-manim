@@ -19,5 +19,18 @@ Python 3.14.10, Manim Community 0.22.1, Typst Python bindings 0.15.2 and
 FFmpeg 9.0.2. The installer keeps upstream license files under env/licenses.
 https://conda-forge.org/
 
+After local setup consent, automatic narration uses the official Kyutai
+Pocket TTS v4.0.1 native release (archive filenames report 3.3.0), under the
+MIT license. The package includes a copy of that license for the upstream
+English 18M config, changed to use only local model and tokenizer paths.
+https://github.com/kyutai-labs/pocket-tts/releases/tag/v4.0.1
+https://github.com/kyutai-labs/pocket-tts/blob/a922b912dfa366975294afb568d815b305acde5d/pocket_tts/config/english_18m_2026-10.yaml
+
+The downloaded English model, tokenizer and Alba voice state are published
+by Kyutai under CC BY 4.0. The voice is performed by Alba MacKenna (CC BY 4.0).
+https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/tree/a7056f505a4a8ca72d8b5fb1440071d6f1a35739/languages/english_18m_2026-10
+https://huggingface.co/kyutai/tts-voices#alba-mackenna
+https://creativecommons.org/licenses/by/4.0/
+
 contract/ contains the shared semantic math scene v3 specification and JSON
 Schema. The renderer consumes that format directly.

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, relative, resolve, sep } from 'node:path';
 import { bundleTestModule } from './bundle-test-module.mjs';
 import { packageFiles, pluginId, zipTool } from './package.mjs';
+import { checkAutomaticNarration } from './qualify-voice.mjs';
 
 const { Runtime, environment, run } = await bundleTestModule('src/runtime.ts');
 const archive = resolve(`${pluginId}.zip`);
@@ -46,11 +47,12 @@ try {
   assert.deepEqual(files.sort(), [...packageFiles].sort());
   status(false);
   assert.match(cli(['install', data], 1, true), /^Usage: .*--allow-download/);
+  assert.match(cli(['install-voice', data], 1, true), /^Usage: .*--allow-download/);
   await assert.rejects(lstat(data), { code: 'ENOENT' });
 
   console.log('ZIP layout and download consent verified; installing pinned runtime.');
   cli(['install', data, '--allow-download'], 21);
-  const installed = status(true);
+  assert.equal(status(true).voiceReady, false);
   const runtime = new Runtime(dist, data);
   const local = await runtime.ready();
   assert.ok(local, 'Expected a verified runtime prefix in the isolated data directory.');
@@ -59,9 +61,18 @@ try {
   const media = (tool, args, minutes = 1) => run(join(bin, tool + (windows ? '.exe' : '')), args,
     scratch, env, AbortSignal.timeout(minutes * minute), tool);
 
-  console.log('Rendering the 90-second synthetic fixture with narration.');
   await run(local.python, ['-I', '-B', fixture, scratch], scratch, env, AbortSignal.timeout(minute), 'Fixture');
-  cli(['render', data, join(scratch, 'plan.json'), video, join(scratch, 'narration.wav')], 13);
+  const plan = join(scratch, 'plan.json');
+  assert.match(cli(['render', data, plan, video], 1, true), /Install the offline voice/);
+  await assert.rejects(lstat(video), { code: 'ENOENT' });
+  console.log('Qualifying the pinned offline voice with the synthetic fixture.');
+  cli(['install-voice', data, '--allow-download'], 21);
+  const installed = status(true);
+  assert.equal(installed.voiceReady, true);
+  await checkAutomaticNarration(runtime, plan, scratch);
+
+  console.log('Rendering the 90-second synthetic fixture with automatic offline narration.');
+  cli(['render', data, plan, video], 13);
   const probe = JSON.parse(await media('ffprobe', ['-v', 'error', '-show_entries',
     'format=duration:stream=codec_type,codec_name,duration', '-of', 'json', video]));
   assert.deepEqual(probe.streams.map(({ codec_type, codec_name }) => `${codec_type}/${codec_name}`).sort(),

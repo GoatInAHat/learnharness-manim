@@ -8,8 +8,8 @@ import { bundleTestModule } from './bundle-test-module.mjs';
 import { pack, packageFiles, pluginId, zipTool } from './package.mjs';
 
 const require = createRequire(import.meta.url);
-const [{ Jobs }, { environment, run }, { CHUNK_BYTES, WAV_BYTES }] = await Promise.all(
-  ['src/jobs.ts', 'src/runtime.ts', 'src/protocol.ts'].map(bundleTestModule),
+const [{ Jobs }, { environment, run }, { CHUNK_BYTES, WAV_BYTES }, { emptyNarration, placeUtterance }] = await Promise.all(
+  ['src/jobs.ts', 'src/runtime.ts', 'src/protocol.ts', 'src/voice.ts'].map(bundleTestModule),
 );
 
 async function scratch(t) {
@@ -53,7 +53,9 @@ test('standalone package extracts to the LearnHarness plugin layout and activate
   const status = await operations.get('status')();
   assert.equal(status.ready, false);
   assert.equal(status.install, null);
-  assert.throws(() => operations.get('install')({ confirmed: 'true' }), /Confirm the runtime download/);
+  assert.equal(status.voiceReady, false);
+  assert.throws(() => operations.get('install')({ confirmed: 'true', narration: 'automatic' }), /Confirm the local setup download/);
+  assert.throws(() => operations.get('install')({ confirmed: true, narration: 'unexpected' }), /Select a narration option/);
   assert.deepEqual(await readdir(plugin), ['dist']);
 });
 
@@ -69,7 +71,8 @@ test('job API caps UTF-8 plans, chunk ordering, and total WAV bytes, and cancels
   }, new AbortController().signal);
   t.after(() => jobs.dispose());
   await assert.rejects(jobs.create('é'.repeat(32769)), /allowed size/);
-  const id = await jobs.create('{}');
+  const id = await jobs.create('{}', 'wav');
+  assert.throws(() => jobs.start(id), /Attach a cue-aligned WAV/);
   const chunk = Buffer.alloc(CHUNK_BYTES, 0x8e).toString('base64');
   await assert.rejects(jobs.upload(id, 1, chunk), /out of sequence/);
   await assert.rejects(jobs.upload(id, 0, 'AA'), /Invalid audio chunk/);
@@ -80,6 +83,43 @@ test('job API caps UTF-8 plans, chunk ordering, and total WAV bytes, and cancels
   await jobs.remove(id);
   assert.equal(stopped, true);
   assert.deepEqual(await readdir(folder), []);
+});
+
+test('jobs default to automatic narration and require an explicit silent or WAV selection', async (t) => {
+  const folder = await scratch(t);
+  const rendered = [];
+  const jobs = new Jobs(folder, {
+    ready: async () => true, validate: async () => {},
+    render: async (_folder, _signal, narration) => { rendered.push(narration); return 1; },
+  }, new AbortController().signal);
+  t.after(() => jobs.dispose());
+  await assert.rejects(jobs.create('{}', 'other'), /Unknown narration option/);
+  for (const mode of [undefined, 'silent', 'wav']) {
+    const id = await jobs.create('{}', mode);
+    if (mode === 'wav') await jobs.upload(id, 0, 'AA==');
+    else await assert.rejects(jobs.upload(id, 0, 'AA=='), /Select the WAV narration option/);
+    jobs.start(id);
+    await jobs.remove(id);
+  }
+  assert.deepEqual(rendered, ['automatic', 'silent', 'wav']);
+});
+
+test('PCM placement starts at the exact cue and rejects truncation, silence and overrun', async (t) => {
+  const path = join(await scratch(t), 'beat.wav');
+  const speech = emptyNarration(1);
+  const wav = emptyNarration(4);
+  await writeFile(path, speech);
+  await assert.rejects(placeUtterance(wav, path, 1, 1, 2), /silent/);
+  speech.writeInt16LE(1200, 44);
+  speech.writeInt16LE(-800, speech.length - 2);
+  await writeFile(path, speech.subarray(0, -2));
+  await assert.rejects(placeUtterance(wav, path, 1, 1, 2), /complete mono PCM/);
+  await writeFile(path, speech);
+  await assert.rejects(placeUtterance(wav, path, 1, 1, 1), /exceeds its cue window/);
+  await placeUtterance(wav, path, 1, 1, 2);
+  assert.ok(wav.subarray(44, 1644).every((byte) => byte === 0));
+  assert.deepEqual(wav.subarray(1644, 3244), speech.subarray(44));
+  assert.ok(wav.subarray(3244).every((byte) => byte === 0));
 });
 
 test('subprocesses receive a private environment and are terminated on cancel and timeout', async (t) => {

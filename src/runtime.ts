@@ -8,6 +8,9 @@ import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { pathToFileURL } from 'node:url';
 import { VIDEO_BYTES } from './protocol';
+import type { Narration } from './protocol';
+import { emptyNarration, placeUtterance, voiceBinary, voiceConfig, voiceDownloadMiB, voiceModels, voiceModelURL,
+  voiceRelease, voiceRevision } from './voice';
 
 const release = '2.9.0-0';
 const binaries = {
@@ -70,7 +73,7 @@ export function run(program: string, args: string[], cwd: string, env: NodeJS.Pr
       kill('SIGTERM');
       killTimer = setTimeout(() => kill('SIGKILL'), 1500);
     };
-    child.stdout.on('data', (data: Buffer) => { output = (output + data.toString()).slice(-16_384); });
+    child.stdout.on('data', (data: Buffer) => { output = (output + data.toString()).slice(-48 * 1024); });
     child.stderr.on('data', (data: Buffer) => { stderr = (stderr + data.toString()).slice(-512); });
     child.once('error', () => { error = new Error(`${stage} could not start.`); });
     signal.addEventListener('abort', abort, { once: true });
@@ -89,9 +92,9 @@ export function run(program: string, args: string[], cwd: string, env: NodeJS.Pr
   });
 }
 
-async function digest(path: string) {
+async function digest(path: string, signal?: AbortSignal) {
   const hash = createHash('sha256');
-  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  for await (const chunk of createReadStream(path, { signal })) hash.update(chunk);
   return hash.digest('hex');
 }
 
@@ -102,9 +105,10 @@ function request(url: URL, signal: AbortSignal) {
   });
 }
 
-async function download(source: string, path: string, sha: string, maxBytes: number, signal: AbortSignal) {
+async function download(source: string, path: string, sha: string, maxBytes: number, signal: AbortSignal, exact = false) {
   let url = new URL(source);
-  const allowed = new Set(['github.com', 'release-assets.githubusercontent.com', 'conda.anaconda.org']);
+  const allowed = new Set(url.host === 'huggingface.co' ? ['huggingface.co', 'us.aws.cdn.hf.co', 'eu.aws.cdn.hf.co'] :
+    ['github.com', 'release-assets.githubusercontent.com', 'conda.anaconda.org']);
   for (let redirects = 0; redirects < 4; redirects++) {
     signal.throwIfAborted();
     if (url.protocol !== 'https:' || !allowed.has(url.host) || url.username || url.password) throw new Error('Unexpected runtime download host.');
@@ -129,6 +133,7 @@ async function download(source: string, path: string, sha: string, maxBytes: num
       },
     });
     await pipeline(response, check, createWriteStream(path, { flags: 'wx', mode: 0o600 }), { signal });
+    if (exact && size !== maxBytes) throw new Error('Runtime download did not match its locked size.');
     if (hash.digest('hex') !== sha) throw new Error('Runtime download failed SHA-256 verification.');
     return;
   }
@@ -183,6 +188,20 @@ async function signRelocatedMachO(prefix: string, scratch: string, signal: Abort
 const pythonAt = (prefix: string) => join(prefix, ...(windows ? ['python.exe'] : ['bin', 'python']));
 const ffmpegAt = (prefix: string) => join(prefix, ...(windows ? ['Library', 'bin', 'ffmpeg.exe'] : ['bin', 'ffmpeg']));
 const readyFile = 'ready.json';
+const voiceDirectory = `pocket-tts-${voiceRelease}-${voiceRevision.slice(0, 12)}-${voiceConfig.sha.slice(0, 12)}`;
+const voiceRequired = 'Install the offline voice for automatic narration, or choose Silent or a narration WAV.';
+const voiceCPU = process.arch === 'x64' ? ' (requires an AVX2 CPU)' : '';
+
+async function checkVoiceFiles(folder: string, signal?: AbortSignal) {
+  if (!voiceBinary) return false;
+  for (const asset of [voiceBinary.executable, ...voiceModels, voiceConfig, { file: 'LICENSE', sha: voiceBinary.licenseSha }]) {
+    const path = join(folder, asset.file);
+    const stat = await lstat(path);
+    if (!stat.isFile() || ('bytes' in asset ? stat.size !== asset.bytes : stat.size <= 0 || stat.size > 4096) ||
+        (signal && await digest(path, signal) !== asset.sha)) return false;
+  }
+  return true;
+}
 
 async function runtimeFile(prefix: string, path: string) {
   const file = await realpath(path);
@@ -194,6 +213,7 @@ async function runtimeFile(prefix: string, path: string) {
 }
 
 export class Runtime {
+  private voiceInvalid = false;
   constructor(private readonly assets: string, private readonly data: string) {}
 
   private async paths() {
@@ -225,7 +245,79 @@ export class Runtime {
 
   async status() {
     return { supported: Boolean(binary), platform: binary?.[0] ?? host,
-      downloadMiB: binary?.[3] ?? null, ready: Boolean(await this.ready()), versions };
+      downloadMiB: binary?.[3] ?? null, ready: Boolean(await this.ready()), versions,
+      voiceReady: !this.voiceInvalid && Boolean(await this.voiceReady()), voiceDownloadMiB };
+  }
+
+  private async voiceReady(signal?: AbortSignal) {
+    if (!voiceBinary) return null;
+    const voices = join(this.data, 'voice');
+    const root = join(voices, voiceDirectory);
+    const marker = join(root, readyFile);
+    try {
+      if (!(await lstat(voices)).isDirectory() || !(await lstat(root)).isDirectory()) return null;
+      const stat = await lstat(marker);
+      if (!stat.isFile() || stat.size !== 14) return null;
+      const directory = await readFile(marker, 'utf8');
+      if (!/^install-[a-zA-Z0-9]{6}$/.test(directory)) return null;
+      const folder = join(root, directory);
+      if (!(await lstat(folder)).isDirectory() || !await checkVoiceFiles(folder, signal)) return null;
+      return realpath(folder);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    }
+  }
+
+  async installVoice(signal: AbortSignal, progress: (message: string) => void) {
+    signal.throwIfAborted();
+    if (!voiceBinary) throw new Error('The offline voice is unavailable on this platform.');
+    if (await this.voiceReady(signal)) { this.voiceInvalid = false; return; }
+    const config = (await readFile(join(this.assets, 'assets', 'runtime', 'voice', voiceConfig.file), 'utf8')).replaceAll('\r\n', '\n');
+    if (createHash('sha256').update(config).digest('hex') !== voiceConfig.sha) throw new Error('Offline voice configuration failed verification.');
+    const voices = await privateDirectory(join(this.data, 'voice'));
+    const root = await privateDirectory(join(voices, voiceDirectory));
+    const folder = await mkdtemp(join(root, 'install-'));
+    let committed = false;
+    try {
+      const archive = join(folder, voiceBinary.archive);
+      const layout = voiceBinary.archive.replace(/\.(tar\.gz|zip)$/, '');
+      const { file } = voiceBinary.executable;
+      progress('Downloading the pinned Pocket TTS executable.');
+      await download(`https://github.com/kyutai-labs/pocket-tts/releases/download/${voiceRelease}/${voiceBinary.archive}`,
+        archive, voiceBinary.sha, voiceBinary.bytes, signal, true);
+      await run(windows ? join(system32, 'tar.exe') : '/usr/bin/tar',
+        ['-xf', archive, `${layout}/${file}`, `${layout}/LICENSE`], folder, environment(folder), signal, 'Voice archive extraction');
+      await rename(join(folder, layout, file), join(folder, file));
+      await rename(join(folder, layout, 'LICENSE'), join(folder, 'LICENSE'));
+      await rm(join(folder, layout), { recursive: true });
+      await rm(archive);
+      const executable = join(folder, file);
+      if (!(await lstat(executable)).isFile() || await digest(executable, signal) !== voiceBinary.executable.sha) {
+        throw new Error('Offline voice executable failed verification.');
+      }
+      if (!windows) await chmod(executable, 0o700);
+      // This pinned upstream release reports the same 3.3.0 version as its asset filenames.
+      const version = await run(executable, ['--version'], folder, environment(folder), signal, `Offline voice startup${voiceCPU}`);
+      if (version.trim() !== 'pocket-tts 3.3.0') throw new Error('Offline voice executable version did not match.');
+      for (const asset of voiceModels) {
+        progress(`Downloading and verifying the offline voice: ${asset.file}.`);
+        await download(`${voiceModelURL}/${asset.remote ?? asset.file}`, join(folder, asset.file), asset.sha, asset.bytes, signal, true);
+      }
+      await writeFile(join(folder, voiceConfig.file), config, { flag: 'wx', mode: 0o600 });
+      if (!await checkVoiceFiles(folder, signal)) throw new Error('Installed voice files failed verification.');
+      const marker = join(folder, readyFile);
+      await writeFile(marker, basename(folder), { flag: 'wx', mode: 0o600 });
+      signal.throwIfAborted();
+      await rename(marker, join(root, readyFile));
+      committed = true;
+      this.voiceInvalid = false;
+    } catch (error) {
+      signal.throwIfAborted();
+      throw error;
+    } finally {
+      if (!committed) await rm(folder, { recursive: true, force: true, maxRetries: 3 });
+    }
   }
 
   async install(signal: AbortSignal, progress: (message: string) => void) {
@@ -296,26 +388,57 @@ export class Runtime {
     }
   }
 
-  async validate(scratch: string, signal: AbortSignal) {
+  async validate(scratch: string, signal: AbortSignal, narration = false) {
     const runtime = await this.ready();
     if (!runtime) throw new Error('Install the pinned runtime before validating a plan.');
-    const output = await run(runtime.python, ['-I', '-B', join(this.assets, 'assets', 'renderer', 'semantic.py'), join(scratch, 'plan.json')],
+    const output = await run(runtime.python, ['-I', '-B', join(this.assets, 'assets', 'renderer', 'semantic.py'), join(scratch, 'plan.json'),
+      ...(narration ? ['--narration'] : [])],
       scratch, environment(scratch, runtime.prefix), signal, 'Plan validation');
-    const result = JSON.parse(output);
+    const result = JSON.parse(output) as { valid: boolean; message?: string; duration: number; beats: [string, number, number][] };
     if (result.valid !== true) throw new Error(result.message || 'Invalid lesson plan.');
+    return result;
   }
 
-  async render(scratch: string, signal: AbortSignal, height: 720 | 1080 = 720) {
+  async prepareNarration(scratch: string, signal: AbortSignal) {
+    const { duration, beats } = await this.validate(scratch, signal, true);
+    const folder = await this.voiceReady(signal);
+    if (!folder || !voiceBinary) {
+      this.voiceInvalid = true;
+      throw new Error(voiceRequired);
+    }
+    const wav = emptyNarration(duration);
+    const env = { ...environment(scratch), KPOCKET_TTS_ERROR_WITHOUT_EOS: '1' };
+    const utterance = join(scratch, 'utterance.wav');
+    for (const [index, [text, cue, end]] of beats.entries()) {
+      const beat = index + 1;
+      const stage = `Automatic narration for beat ${beat}${voiceCPU}`;
+      try {
+        await run(join(folder, voiceBinary.executable.file),
+          ['generate', '--quiet', '--config', voiceConfig.file, '--voice', 'alba.safetensors', `--text=${text}`, '--output-path', utterance],
+          folder, env, AbortSignal.any([signal, AbortSignal.timeout(60_000)]), stage);
+        await placeUtterance(wav, utterance, beat, cue, end);
+      } catch (error) {
+        if ((error as Error).name === 'TimeoutError') throw new Error(`${stage} timed out.`);
+        throw error;
+      } finally {
+        await rm(utterance, { force: true });
+      }
+    }
+    signal.throwIfAborted();
+    await writeFile(join(scratch, 'narration.wav'), wav, { flag: 'wx', mode: 0o600, signal });
+  }
+
+  async render(scratch: string, signal: AbortSignal, narration: Narration, height: 720 | 1080 = 720) {
     const runtime = await this.ready();
     if (!runtime) throw new Error('Install the pinned runtime before rendering.');
+    if (narration === 'automatic') await this.prepareNarration(scratch, signal);
     const env = environment(scratch, runtime.prefix);
-    await run(runtime.python, ['-I', '-B', join(this.assets, 'assets', 'renderer', 'scene.py'), scratch, String(height)],
+    await run(runtime.python, ['-I', '-B', join(this.assets, 'assets', 'renderer', 'scene.py'), scratch, String(height),
+      narration === 'silent' ? 'silent' : 'wav'],
       scratch, env, signal, 'Manim render');
     const path = join(scratch, 'video.mp4');
     const pcm = join(scratch, 'pcm.wav');
-    if (await lstat(pcm).catch((error: NodeJS.ErrnoException) => {
-      if (error.code !== 'ENOENT') throw error;
-    })) {
+    if (narration !== 'silent') {
       const ffmpeg = await runtimeFile(runtime.prefix, ffmpegAt(runtime.prefix));
       const muxed = join(scratch, 'muxed.mp4');
       await run(ffmpeg, ['-nostdin', '-hide_banner', '-loglevel', 'error', '-n', '-i', path, '-i', pcm,

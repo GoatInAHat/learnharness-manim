@@ -22,7 +22,7 @@ export const activate: PluginBackendModule['activate'] = (ctx) => {
   const nativeAgents = ['teacher', 'practice'] as const;
 
   ctx.cleanup(async () => {
-    installation?.abort.abort(new Error('Runtime installation cancelled.'));
+    installation?.abort.abort(new Error('Installation cancelled.'));
     await Promise.allSettled([jobs.dispose(), installation?.work]);
   });
 
@@ -30,22 +30,31 @@ export const activate: PluginBackendModule['activate'] = (ctx) => {
     ...await runtime.status(), install: installation?.progress ?? null, jobs: jobs.list(),
   })));
   ctx.cleanup(ctx.handle('install', (raw) => {
-    if (object(raw).confirmed !== true) throw new Error('Confirm the runtime download first.');
-    if (installation) throw new Error('Runtime installation is already running.');
+    const { confirmed, narration } = object(raw);
+    if (confirmed !== true) throw new Error('Confirm the local setup download first.');
+    if (narration !== 'automatic' && narration !== 'silent' && narration !== 'wav') throw new Error('Select a narration option.');
+    if (installation) throw new Error('An installation is already running.');
     ctx.signal.throwIfAborted();
     const abort = new AbortController();
     const timer = AbortSignal.timeout(20 * 60 * 1000);
     const signal = AbortSignal.any([ctx.signal, abort.signal, timer]);
-    const task: Installation = { abort, progress: 'Preparing runtime installation.' };
+    const task: Installation = { abort, progress: 'Preparing local setup.' };
     installation = task;
-    task.work = runtime.install(signal, (progress) => { task.progress = progress; }).finally(() => { installation = undefined; });
+    const progress = (message: string) => { task.progress = message; };
+    task.work = (async () => {
+      await runtime.install(signal, progress);
+      if (narration === 'automatic') await runtime.installVoice(signal, progress);
+    })().finally(() => { installation = undefined; });
     return task.work.then(() => ({ installed: true }));
   }));
   ctx.cleanup(ctx.handle('cancelInstall', () => {
-    installation?.abort.abort(new Error('Runtime installation cancelled.'));
+    installation?.abort.abort(new Error('Installation cancelled.'));
     return true;
   }));
-  ctx.cleanup(ctx.handle('create', (raw) => jobs.create(object(raw).plan)));
+  ctx.cleanup(ctx.handle('create', (raw) => {
+    const { plan, narration } = object(raw);
+    return jobs.create(plan, narration);
+  }));
   ctx.cleanup(ctx.handle('upload', async (raw) => {
     const { id, offset, data } = object(raw);
     await jobs.upload(id, offset, data);
@@ -113,11 +122,14 @@ export const activate: PluginBackendModule['activate'] = (ctx) => {
     agents: [...nativeAgents],
     create: () => [{
       name: 'manim_render_lesson', label: 'Render Manim lesson',
-      description: 'Render an already validated semantic math scene v3 JSON plan. Requires the user to have installed the local runtime. Returns a disposable job in the Manim Explainer view.',
-      parameters: Type.Object({ plan: Type.String({ minLength: 1, maxLength: PLAN_BYTES }) }, { additionalProperties: false }),
+      description: 'Render an already validated semantic math scene v3 JSON plan. Requires the local runtime and defaults to automatic narration with the installed offline voice. Use silent only when requested. Returns a disposable job in Manim Explainer.',
+      parameters: Type.Object({ plan: Type.String({ minLength: 1, maxLength: PLAN_BYTES }),
+        narration: Type.Optional(Type.Union([Type.Literal('automatic'), Type.Literal('silent')])) }, { additionalProperties: false }),
       async execute(_call, input, signal) {
         signal?.throwIfAborted();
-        const id = await jobs.create(object(input).plan);
+        const { plan, narration } = object(input);
+        if (narration !== undefined && narration !== 'automatic' && narration !== 'silent') throw new Error('Unknown narration option.');
+        const id = await jobs.create(plan, narration);
         try {
           signal?.throwIfAborted();
           jobs.start(id);
