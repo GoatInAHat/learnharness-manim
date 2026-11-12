@@ -5,13 +5,19 @@ import { PLAN_BYTES, WAV_BYTES } from './protocol';
 import { privateDirectory, Runtime } from './runtime';
 
 async function copyBounded(source: string, destination: string, limit: number) {
-  const file = await open(resolve(source), 'r');
+  const file = await open(resolve(source), constants.O_RDONLY | constants.O_NONBLOCK);
   try {
-    const { size } = await file.stat();
-    if (!(await file.stat()).isFile() || size <= 0 || size > limit) throw new Error('Input is empty, oversized, or not a regular file.');
+    const stat = await file.stat();
+    const { size } = stat;
+    if (!stat.isFile() || size <= 0 || size > limit) throw new Error('Input is empty, oversized, or not a regular file.');
     const buffer = Buffer.alloc(size + 1);
-    const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
-    if (bytesRead !== size) throw new Error('Input changed during read.');
+    let offset = 0;
+    while (offset <= size) {
+      const { bytesRead } = await file.read(buffer, offset, buffer.length - offset, offset);
+      if (!bytesRead) break;
+      offset += bytesRead;
+    }
+    if (offset !== size) throw new Error('Input changed during read.');
     await writeFile(destination, buffer.subarray(0, size), { mode: 0o600 });
   } finally {
     await file.close();
@@ -21,8 +27,9 @@ async function copyBounded(source: string, destination: string, limit: number) {
 async function main(args: string[]) {
   const [command, root, plan, output, wav, extra] = args;
   if (!root || extra || !((command === 'status' && !plan) || (command === 'install' && plan === '--allow-download' && !output) ||
-      (command === 'validate' && plan && !output) || (command === 'render' && plan && output))) {
-    throw new Error('Usage: cli.cjs status DATA | install DATA --allow-download | validate DATA PLAN.json | render DATA PLAN.json OUTPUT.mp4 [NARRATION.wav]');
+      (command === 'validate' && plan && !output) || (command === 'render' && plan && output) ||
+      (command === 'compare' && plan && output && wav))) {
+    throw new Error('Usage: cli.cjs status DATA | install DATA --allow-download | validate DATA PLAN.json | render DATA PLAN.json OUTPUT.mp4 [NARRATION.wav] | compare DATA PLAN.json OUTPUT.mp4 NARRATION.wav');
   }
   const runtime = new Runtime(__dirname, resolve(root));
   if (command === 'status') {
@@ -50,8 +57,9 @@ async function main(args: string[]) {
         return;
       }
       if (wav) await copyBounded(wav, join(scratch, 'narration.wav'), WAV_BYTES);
-      await runtime.render(scratch, signal);
+      await runtime.render(scratch, signal, command === 'compare' ? 1080 : 720);
       signal.throwIfAborted();
+      // A private, exclusive output stays private even under a permissive umask.
       await copyFile(join(scratch, 'video.mp4'), resolve(output), constants.COPYFILE_EXCL);
       console.log('Video rendered.');
     } finally {

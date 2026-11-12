@@ -14,7 +14,9 @@ export const activate: PluginFrontendModule['activate'] = (ctx) => {
     const runtimeLine = paragraph('Checking local runtime…');
     const consent = document.createElement('input');
     consent.type = 'checkbox';
-    const installNote = field(consent, 'Allow the pinned conda-forge runtime download (approximately 200–300 MB).');
+    const installNote = field(consent, '');
+    const downloadNote = document.createElement('span');
+    installNote.append(downloadNote);
     const install = button('Install local runtime', async () => {
       install.disabled = true;
       try { await ctx.call('install', { confirmed: consent.checked }); }
@@ -58,7 +60,11 @@ export const activate: PluginFrontendModule['activate'] = (ctx) => {
         for (let offset = 0; file && offset < file.size; offset += CHUNK_BYTES) {
           signal.throwIfAborted();
           const bytes = new Uint8Array(await file.slice(offset, offset + CHUNK_BYTES).arrayBuffer());
-          const data = bytes.toBase64();
+          let binary = '';
+          for (let index = 0; index < bytes.length; index += 8192) {
+            binary += String.fromCharCode(...bytes.subarray(index, index + 8192));
+          }
+          const data = btoa(binary);
           await ctx.call('upload', { id, offset, data });
         }
         signal.throwIfAborted();
@@ -150,14 +156,14 @@ export const activate: PluginFrontendModule['activate'] = (ctx) => {
       return p;
     }
 
-    function field(input: HTMLElement, name: string, parent = root) {
+    function field(input: HTMLElement, name: string, parent: HTMLElement = root) {
       const label = document.createElement('label');
       label.append(name, input);
       parent.append(label);
       return label;
     }
 
-    function button(name: string, fn: () => unknown, parent = root) {
+    function button(name: string, fn: () => unknown, parent: HTMLElement = root) {
       const button = document.createElement('button');
       button.type = 'button';
       button.textContent = name;
@@ -190,6 +196,7 @@ export const activate: PluginFrontendModule['activate'] = (ctx) => {
         const status = await ctx.call<Status>('status');
         if (signal.aborted) return;
         current = status;
+        downloadNote.textContent = `Allow the pinned runtime download (approximately ${status.downloadMiB} MiB).`;
         runtimeLine.textContent = status.install || (!status.supported ? `Runtime unavailable for ${status.platform}.` :
           status.ready ? `Local Manim ${status.versions.manim} is ready.` : `Install Manim ${status.versions.manim} to render or validate plans.`);
         updateControls();
@@ -230,7 +237,7 @@ export const activate: PluginFrontendModule['activate'] = (ctx) => {
         for (let offset = 0; offset < job.size; offset += CHUNK_BYTES) {
           signal.throwIfAborted();
           const data = await ctx.call<string>('chunk', { id: job.id, offset });
-          const bytes = Uint8Array.fromBase64(data);
+          const bytes = Uint8Array.from(atob(data), (character) => character.charCodeAt(0));
           if (bytes.length !== Math.min(CHUNK_BYTES, job.size - offset)) throw new Error('Received an invalid video chunk.');
           parts.push(bytes);
         }

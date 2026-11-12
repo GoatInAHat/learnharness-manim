@@ -1,3 +1,23 @@
-The unmodified portable LearnHarness Plugin API v1 SDK in .sdk is from
-LearnHarness 0.6.0 (https://github.com/amosblomqvist/learnharness), distributed
-under the GNU Affero General Public License v3. See LICENSE.
+Manim Explainer and the unmodified 42-file portable LearnHarness Plugin API v1
+SDK in .sdk are distributed under the GNU Affero General Public License v3.
+See LICENSE. The SDK is version 1.0.0, from the authoring bundle distributed
+with LearnHarness 0.6.0.
+https://github.com/amosblomqvist/learnharness/releases/tag/v0.6.0
+
+The backend includes TypeBox 1.3.27 under the MIT license, included in the built
+package as TYPEBOX-LICENSE.
+https://github.com/sinclairzx81/typebox
+
+The plugin fetches the micromamba 2.9.0-0 standalone bootstrap from its
+official release after the user consents. Its platform SHA-256 digests are
+pinned in src/runtime.ts.
+https://github.com/mamba-org/micromamba-releases/releases/tag/2.9.0-0
+
+runtime/*.tsv records the exact conda-forge archive path, SHA-256 and byte
+count from an explicit solve for each platform. The environment includes
+Python 3.14.10, Manim Community 0.22.1, Typst Python bindings 0.15.2 and
+FFmpeg 9.0.2. The installer keeps upstream license files under env/licenses.
+https://conda-forge.org/
+
+contract/ contains the shared semantic math scene v3 specification and JSON
+Schema. The renderer consumes that format directly.

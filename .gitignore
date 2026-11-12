@@ -1,5 +1,6 @@
 /node_modules/
 /dist/
+/manim-explainer.zip
 /.handoff-index*
 /__pycache__/
 **/__pycache__/

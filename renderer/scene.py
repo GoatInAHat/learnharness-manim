@@ -4,6 +4,7 @@ import math
 import sys
 import textwrap
 import wave
+from array import array
 from pathlib import Path
 
 import numpy as np
@@ -15,7 +16,7 @@ from manim import (
 # Isolated Python omits the script directory. This path is trusted packaged code.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from plan import PlanError, load, require
-from semantic import DISPLAYS, FPS, MAX_PLAN, compile_frame, validate
+from semantic import DISPLAYS, FPS, MAX_PLAN, Frame, compile_frame, validate
 
 BACKGROUND = '#111827'
 PAPER = '#F8FAFC'
@@ -50,9 +51,8 @@ class Timeline(Animation):
 
 
 class LessonScene(MovingCameraScene):
-    def __init__(self, plan, narration):
+    def __init__(self, plan):
         self.plan = plan
-        self.narration = narration
         super().__init__()
 
     def construct(self):
@@ -62,8 +62,6 @@ class LessonScene(MovingCameraScene):
         self.make_plot()
         self.make_geometry()
         self.make_hud()
-        if self.narration:
-            self.add_sound(str(self.narration))
         self.play(Timeline(self))
 
     def make_plot(self):
@@ -95,15 +93,17 @@ class LessonScene(MovingCameraScene):
         for y, height in [(0.421, 0.16), (-0.457, 0.089)]:
             self.pin(Rectangle(width=self.width * 1.01, height=self.height * height, stroke_width=0,
                                fill_color=BACKGROUND, fill_opacity=1), 0, y)
-        self.pin(label(self.plan['title'], 33, width=10), -0.451, 0.456, edge=1)
+        self.pin(label(self.plan['title'], 33, width=7.4), -0.451, 0.456, edge=1)
         self.pin(label(self.plan['y_label'], 19, MUTED, 3.6), -0.451, 0.386, edge=1)
         self.pin(label(self.plan['x_label'], 19, MUTED, 3.6), 0.451, 0.386, edge=-1)
         f, x = self.plan['function'], self.plan['variable']
         # Only single validated ASCII identifiers enter these static math templates.
         fraction = f'frac({f}(a+h) - {f}(a), h)'
+        limit = f'lim_(h arrow.r 0) {fraction}'
         formulas = (
-            f'{f}({x})', 'P, Q', f'Delta {x} = h, quad Delta {f} = {f}(a+h) - {f}(a)',
-            f'm = {fraction}', f'lim_(h arrow.r 0) {fraction}', f"m = {f}'(a)", f"{f}'(a) quad {f}'(b)",
+            f'{f}({x})', f'P = (a, {f}(a)), quad Q = (a+h, {f}(a+h))',
+            f'Delta {x} = h, quad Delta {f} = {f}(a+h) - {f}(a)',
+            f'm = {fraction}', limit, f"{f}'(a) = {limit}", f'{f}\'(a) quad "and" quad {f}\'(b)',
         )
         self.formulas = {}
         self.modes = {}
@@ -132,17 +132,20 @@ class LessonScene(MovingCameraScene):
         self.reference = Dot(radius=0.073, color=PINK)
         self.base_label = MathTypst('P', font_size=28, color=PAPER)
         self.moving_label = MathTypst('Q', font_size=28, color=PINK)
-        self.reference_label = MathTypst('R', font_size=28, color=PINK)
+        self.reference_label = MathTypst('B', font_size=28, color=PINK)
         self.delta_x = Line(LEFT, RIGHT, stroke_width=2.7, color=PINK)
         self.delta_y = Line(DOWN, UP, stroke_width=2.7, color=PINK)
         self.interval = MathTypst('h', font_size=24, color=PINK)
         self.add(self.slope_line, self.reference_line, self.delta_x, self.delta_y, self.interval,
                  self.base, self.moving, self.reference, self.base_label, self.moving_label, self.reference_label)
 
-    def draw_frame(self, state):
+    def draw_frame(self, state: Frame):
         cx, cy, width, height = state['viewport']
         center = self.axes.c2p(cx, cy)
         size = self.axes.c2p(cx + width, cy + height) - center
+        # Fit the authored viewport into the space between the fixed overlays.
+        size[1] /= 0.75
+        center = center + UP * (size[1] * 0.035)
         self.frame.stretch_to_fit_width(size[0]).stretch_to_fit_height(size[1]).move_to(center)
         for item, w, h, x, y, edge in self.hud:
             item.stretch_to_fit_width(w * size[0] / self.width).stretch_to_fit_height(h * size[1] / self.height)
@@ -156,8 +159,10 @@ class LessonScene(MovingCameraScene):
         first, second = self.axes.c2p(*state['p']), self.axes.c2p(*state['q'])
         secant = state['lineKind'] == 'secant'
         show_points = display != 'function'
-        self.point(self.base, self.base_label, first, show_points, UP + LEFT)
-        self.point(self.moving, self.moving_label, second, show_points and secant, UP + RIGHT)
+        scale = (size[0] / self.width, size[1] / self.height)
+        close = np.linalg.norm((second - first)[:2] / scale) < 0.18
+        self.point(self.base, self.base_label, first, show_points, UP + LEFT, scale)
+        self.point(self.moving, self.moving_label, second, show_points and secant, UP + RIGHT, scale, close)
         show_changes = display in {'difference', 'secant', 'limit'}
         elbow = self.axes.c2p(state['q'][0], state['p'][1])
         self.place_line(self.delta_x, first, elbow, show_changes)
@@ -170,7 +175,7 @@ class LessonScene(MovingCameraScene):
             self.slope_line.set_opacity(0)
         reference = state['reference']
         if reference:
-            self.point(self.reference, self.reference_label, self.axes.c2p(*reference[:2]), True, UP + RIGHT)
+            self.point(self.reference, self.reference_label, self.axes.c2p(*reference[:2]), True, UP + RIGHT, scale)
             self.slope(self.reference_line, *reference, state['viewport'])
         else:
             for item in (self.reference, self.reference_label, self.reference_line):
@@ -178,17 +183,24 @@ class LessonScene(MovingCameraScene):
 
     def slope(self, line, x, y, slope, viewport):
         cx, cy, w, h = viewport
-        low, high = cx - w * 0.49, cx + w * 0.49
+        low, high = cx - w / 2, cx + w / 2
         if slope:
-            bounds = sorted(x + (edge - y) / slope for edge in (cy - h * 0.41, cy + h * 0.34))
+            bounds = sorted(x + (edge - y) / slope for edge in (cy - h / 2, cy + h / 2))
             low, high = max(low, bounds[0]), min(high, bounds[1])
-        self.place_line(line, self.axes.c2p(low, y + slope * (low - x)),
-                        self.axes.c2p(high, y + slope * (high - x)), high > low)
+        if high > low and (slope or cy - h / 2 <= y <= cy + h / 2):
+            self.place_line(line, self.axes.c2p(low, y + slope * (low - x)),
+                            self.axes.c2p(high, y + slope * (high - x)), True)
+        else:
+            line.set_opacity(0)
 
     @staticmethod
-    def point(dot, label_, point, visible, direction):
-        dot.move_to(point).set_opacity(float(visible))
-        label_.next_to(dot, direction, buff=0.06).set_opacity(float(visible))
+    def point(dot, label_, point, visible, direction, scale, ring=False):
+        dot.stretch_to_fit_width(scale[0] * (0.22 if ring else 0.146))
+        dot.stretch_to_fit_height(scale[1] * (0.22 if ring else 0.146))
+        dot.move_to(point).set_fill(opacity=float(visible and not ring))
+        dot.set_stroke(width=2 if ring else 0, opacity=float(visible and ring))
+        label_.scale_to_fit_height(0.27 * scale[1])
+        label_.next_to(dot, direction, buff=0.06 * min(scale)).set_opacity(float(visible))
 
     @staticmethod
     def place_line(line, start, end, visible):
@@ -198,39 +210,71 @@ class LessonScene(MovingCameraScene):
         line.set_opacity(float(visible))
 
 
-def narration_at(job, duration):
+def narration_at(job, plan):
     path = job / 'narration.wav'
     if not path.is_file():
         return None
-    require(path.stat().st_size <= 12 * 1024 * 1024, 'Narration WAV exceeds 12 MiB.')
+    size = path.stat().st_size
+    require(44 <= size <= 12 * 1024 * 1024, 'Narration WAV is empty, truncated or exceeds 12 MiB.')
     try:
-        with wave.open(str(path), 'rb') as audio:
-            frames, rate = audio.getnframes(), audio.getframerate()
-            require(audio.getnchannels() == 1 and audio.getsampwidth() == 2 and
-                    16_000 <= rate <= 48_000 and frames == duration * rate,
-                    'Narration needs mono PCM16 at 16–48 kHz, padded to the exact lesson duration.')
-            require(len(audio.readframes(frames)) == frames * 2, 'Narration WAV is truncated.')
+        with path.open('rb') as source:
+            header = source.read(12)
+            require(header[:4] == b'RIFF' and header[8:] == b'WAVE' and
+                    int.from_bytes(header[4:8], 'little') == size - 8, 'Narration WAV has an invalid RIFF header.')
+            source.seek(0)
+            with wave.open(source, 'rb') as audio:
+                frames, rate = audio.getnframes(), audio.getframerate()
+                require(audio.getnchannels() == 1 and audio.getsampwidth() == 2 and
+                        16_000 <= rate <= 48_000 and frames == plan['duration'] * rate,
+                        'Narration needs mono PCM16 at 16–48 kHz, padded to the exact lesson duration.')
+                pcm = audio.readframes(frames)
+                require(len(pcm) == frames * 2, 'Narration WAV is truncated.')
     except (EOFError, wave.Error) as error:
         raise PlanError('Narration is not a supported PCM WAV file.') from error
-    return path
+
+    samples = array('h', pcm)
+    if sys.byteorder != 'little':
+        samples.byteswap()
+
+    def peak(start, end):
+        segment = memoryview(samples)[start:end]
+        return max(max(segment, default=0), -min(segment, default=0))
+
+    previous_end = 0
+    ends = [*plan['starts'][1:], plan['duration'] * FPS]
+    for index, (beat, end_frame) in enumerate(zip(plan['beats'], ends), 1):
+        start = (beat['cueFrame'] * rate + FPS // 2) // FPS
+        end = ((end_frame - 9) * rate + FPS // 2) // FPS
+        require(peak(previous_end, start) <= 100, 'Narration WAV has audio outside its cue windows.')
+        require(peak(start, end) >= 16, f'Narration WAV is silent at beat {index}.')
+        previous_end = end
+    require(peak(previous_end, frames) <= 100, 'Narration WAV has audio outside its cue windows.')
+
+    # Only canonical PCM reaches the media decoder.
+    normalized = job / 'pcm.wav'
+    with wave.open(str(normalized), 'wb') as audio:
+        audio.setparams((1, 2, rate, frames, 'NONE', 'not compressed'))
+        audio.writeframes(pcm)
+    return normalized
 
 
-def render(job):
+def render(job, height):
     plan = load(job / 'plan.json', validate, MAX_PLAN)
-    narration = narration_at(job, plan['duration'])
+    narration_at(job, plan)
     with tempconfig({
         'renderer': 'cairo', 'format': 'mp4', 'output_file': 'video', 'media_dir': str(job / 'media'),
-        'video_dir': str(job), 'pixel_width': 1280, 'pixel_height': 720, 'frame_rate': FPS,
+        'video_dir': str(job), 'pixel_width': height * 16 // 9, 'pixel_height': height, 'frame_rate': FPS,
         'background_color': BACKGROUND, 'disable_caching': True, 'progress_bar': 'none',
         'verbosity': 'ERROR', 'flush_cache': False, 'preview': False, 'notify_outdated_version': False,
     }):
-        LessonScene(plan, narration).render()
+        LessonScene(plan).render()
     require((job / 'video.mp4').is_file(), 'Manim did not create the expected MP4.')
 
 
 if __name__ == '__main__':
     try:
-        render(Path(sys.argv[1]).resolve())
+        require(sys.argv[2] in {'720', '1080'}, 'Unsupported render resolution.')
+        render(Path(sys.argv[1]).resolve(), int(sys.argv[2]))
     except PlanError as error:
         print(str(error), file=sys.stderr)
         sys.exit(2)

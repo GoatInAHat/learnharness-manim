@@ -96,6 +96,10 @@
         "camera": { "$ref": "#/definitions/camera" },
         "display": { "enum": ["function", "points", "difference", "secant", "limit", "tangent", "compare"] },
         "reference": { "$ref": "#/definitions/coordinate" },
+        "narrationScope": {
+          "enum": ["settled", "process"],
+          "description": "Settled (default) requires a cue at least 12 frames after settling. Process describes ongoing camera or visible point movement and requires a cue strictly after the start and at least 12 frames before settling. Specific target values, formulas and states require a settled utterance."
+        },
         "narration": { "type": "string", "minLength": 1, "maxLength": 340 },
         "caption": { "type": "string", "minLength": 1, "maxLength": 105 }
       }

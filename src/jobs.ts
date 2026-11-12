@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { appendFile, lstat, mkdtemp, open, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdtemp, open, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { CHUNK_BYTES, PLAN_BYTES, VIDEO_BYTES, WAV_BYTES } from './protocol';
+import { CHUNK_BYTES, PLAN_BYTES, WAV_BYTES } from './protocol';
 import type { JobView } from './protocol';
 import { privateDirectory, Runtime } from './runtime';
 
@@ -82,8 +82,9 @@ export class Jobs {
     }
     this.signal.throwIfAborted();
     job.writing = true;
+    job.work = appendFile(join(job.folder, 'narration.wav'), bytes, { mode: 0o600 });
     try {
-      await appendFile(join(job.folder, 'narration.wav'), bytes, { mode: 0o600 });
+      await job.work;
       job.audioSize += bytes.length;
     } catch (error) {
       job.state = 'failed';
@@ -104,18 +105,17 @@ export class Jobs {
     const signal = AbortSignal.any([this.signal, job.abort.signal, timeout]);
     job.work = (async () => {
       try {
-        await this.runtime.render(job.folder, signal);
-        const video = await lstat(join(job.folder, 'video.mp4'));
-        if (!video.isFile() || video.size <= 0 || video.size > VIDEO_BYTES) throw new Error('Rendered video exceeds the 96 MiB preview limit.');
+        const size = await this.runtime.render(job.folder, signal);
         signal.throwIfAborted();
-        job.size = video.size;
+        job.size = size;
         job.state = 'ready';
       } catch (error) {
         job.state = job.abort.signal.aborted ? 'cancelled' : 'failed';
         job.error = timeout.aborted ? 'Render exceeded 12 minutes.' : job.state === 'failed' ? (error as Error).message : undefined;
       } finally {
         // The video is the only artefact retained until deletion or expiry.
-        await Promise.allSettled(['media', 'plan.json', 'narration.wav', ...(job.state === 'ready' ? [] : ['video.mp4'])]
+        const entries = await readdir(job.folder);
+        await Promise.allSettled(entries.filter((path) => path !== 'video.mp4' || job.state !== 'ready')
           .map((path) => rm(join(job.folder, path), { recursive: true, force: true })));
       }
     })();
@@ -141,8 +141,8 @@ export class Jobs {
     this.jobs.delete(job.id);
     clearTimeout(job.timer);
     job.abort.abort(new Error('Render cancelled.'));
-    await job.work;
-    await rm(job.folder, { recursive: true, force: true });
+    try { await job.work; }
+    finally { await rm(job.folder, { recursive: true, force: true }); }
   }
 
   async dispose() {

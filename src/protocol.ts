@@ -14,6 +14,7 @@ export interface Status {
   supported: boolean;
   ready: boolean;
   platform: string;
+  downloadMiB: number | null;
   versions: { python: string; manim: string; typst: string };
   install: string | null;
   jobs: JobView[];

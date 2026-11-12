@@ -7,11 +7,17 @@ import { PLAN_BYTES } from './protocol';
 import type { DraftModel, Status } from './protocol';
 import { privateDirectory, Runtime } from './runtime';
 
+interface Installation {
+  abort: AbortController;
+  work?: Promise<void>;
+  progress: string;
+}
+
 export const activate: PluginBackendModule['activate'] = (ctx) => {
   const runtime = new Runtime(ctx.directory, ctx.dataDirectory);
   const scratch = join(ctx.dataDirectory, 'manim-jobs');
   const jobs = new Jobs(scratch, runtime, ctx.signal);
-  let installation: { abort: AbortController; work?: Promise<void>; progress: string } | undefined;
+  let installation: Installation | undefined;
   const drafts = new Map<string, AbortController>();
   const nativeAgents = ['teacher', 'practice'] as const;
 
@@ -30,7 +36,7 @@ export const activate: PluginBackendModule['activate'] = (ctx) => {
     const abort = new AbortController();
     const timer = AbortSignal.timeout(20 * 60 * 1000);
     const signal = AbortSignal.any([ctx.signal, abort.signal, timer]);
-    const task: NonNullable<typeof installation> = { abort, progress: 'Preparing runtime installation.' };
+    const task: Installation = { abort, progress: 'Preparing runtime installation.' };
     installation = task;
     task.work = runtime.install(signal, (progress) => { task.progress = progress; }).finally(() => { installation = undefined; });
     return task.work.then(() => ({ installed: true }));
@@ -81,7 +87,7 @@ export const activate: PluginBackendModule['activate'] = (ctx) => {
       if (!selected) throw new Error('Select an available model explicitly.');
       const model: PluginModelSpec = { id: selected.id, provider: selected.provider };
       const [contract, schema] = await Promise.all(['semantic-math-v3.md', 'semantic-math-v3.schema.json']
-        .map((file) => readFile(join(ctx.directory, 'contract', file), 'utf8')));
+        .map((file) => readFile(join(ctx.directory, 'assets', 'contract', file), 'utf8')));
       signal.throwIfAborted();
       const result = await ctx.inference.complete({
         model, purpose: 'user', signal, options: { maxTokens: 5200, maxRetries: 0 },

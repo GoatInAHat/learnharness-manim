@@ -5,17 +5,36 @@ import json
 import math
 import sys
 from pathlib import Path
+from typing import Literal, TypedDict
 
 if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from plan import PlanError, array, fields, line, load, number, require, slope_at, value_and_derivative
+from plan import PlanError, array, fields, line, load, number, require, small_rise, value_and_derivative
 
 FPS = 30
 MAX_PLAN = 64 * 1024
 DISPLAYS = ('function', 'points', 'difference', 'secant', 'limit', 'tangent', 'compare')
 NONZERO = {'difference', 'secant', 'limit'}
 ZERO = {'tangent', 'compare'}
+
+Viewport = tuple[float, float, float, float]
+
+
+class Frame(TypedDict):
+    frame: int
+    beat: int
+    cue: int
+    narrationScope: Literal['settled', 'process']
+    display: str
+    viewport: Viewport
+    p: tuple[float, float]
+    q: tuple[float, float]
+    h: float
+    lineKind: Literal['secant', 'tangent']
+    slope: float
+    reference: tuple[float, float, float] | None
+    caption: str | None
 
 
 def integer(value, low, high):
@@ -56,7 +75,7 @@ def graph_ast(node, depth=1, budget=None):
         return 'smooth', child('input'), number(node['steepness'], 1, 16)
     if op == 'piecewise' and depth == 1:
         fields(node, ('op', 'at', 'before', 'after'))
-        return 'piece', [(coordinate(node['at']), child('before'))], child('after')
+        return 'piece', coordinate(node['at']), child('before'), child('after')
     raise PlanError('Unsupported graph expression operator or nested piecewise expression.')
 
 
@@ -69,7 +88,7 @@ def name(value):
     return value
 
 
-def viewport(camera):
+def viewport(camera) -> Viewport:
     fields(camera, ('x', 'y', 'width', 'height'))
     return (coordinate(camera['x']), coordinate(camera['y']), number(camera['width'], 0.02, 2000),
             number(camera['height'], 0.02, 2000))
@@ -79,7 +98,8 @@ def compatible(display, h):
     return display not in (ZERO if h else NONZERO)
 
 
-def compile_frame(plan, frame):
+def compile_frame(plan, frame: int) -> Frame:
+    require(0 <= frame < plan['duration'] * FPS, 'Frame outside the lesson.')
     index = bisect.bisect_right(plan['starts'], frame) - 1
     beat = plan['beats'][index]
     a, h, camera, display = beat['a'], beat['h'], beat['camera'], beat['display']
@@ -87,20 +107,36 @@ def compile_frame(plan, frame):
         previous = plan['beats'][index - 1]
         u = (frame - beat['startFrame']) / (beat['settleFrame'] - beat['startFrame'])
         w = u * u * (3 - 2 * u)
-        a = previous['a'] + w * (a - previous['a'])
-        h = previous['h'] + w * (h - previous['h'])
-        camera = tuple((p + w * (q - p)) if i < 2 else math.exp(math.log(p) + w * (math.log(q) - math.log(p)))
-                       for i, (p, q) in enumerate(zip(previous['camera'], camera)))
+        a = (1 - w) * previous['a'] + w * a
+        h = (1 - w) * previous['h'] + w * h
+        px, py, pw, ph = previous['camera']
+        cx, cy, cw, ch = camera
+        camera = ((1 - w) * px + w * cx, (1 - w) * py + w * cy,
+                  math.exp((1 - w) * math.log(pw) + w * math.log(cw)),
+                  math.exp((1 - w) * math.log(ph) + w * math.log(ch)))
         display = previous['display'] if compatible(previous['display'], h) else 'points'
-    mode, y, next_y, slope = slope_at(plan['expr'], a, h)
+    expr = plan['expr']
+    y, derivative = value_and_derivative(expr, a)
+    q = a + h
+    require(h == 0 or q != a, 'A nonzero interval must have distinct x coordinates.')
+    next_y, next_derivative = value_and_derivative(expr, q) if h else (y, derivative)
+    rise = next_y - y
+    if h and abs(rise) < 1e-8 * max(1, abs(y), abs(next_y)):
+        rise = small_rise(expr, a, h)
+    slope = rise / h if h else derivative
+    bounded(y, next_y, derivative, next_derivative, slope)
     reference = None
     if display == 'compare':
         target = beat if frame >= beat['settleFrame'] else plan['beats'][index - 1]
         ref = target['reference']
-        reference = (ref, *value_and_derivative(plan['expr'], ref))
-    return dict(frame=frame, beat=index, cue=beat['cueFrame'], display=display, viewport=camera,
-                p=(a, y), q=(a + h, next_y), h=h, lineKind=mode, slope=slope, reference=reference,
-                caption=beat.get('caption') if frame >= beat['cueFrame'] else None)
+        if ref == a:
+            display = 'points'
+        else:
+            reference = (ref, *value_and_derivative(expr, ref))
+    return Frame(frame=frame, beat=index, cue=beat['cueFrame'], narrationScope=beat['narrationScope'],
+                 display=display, viewport=camera,
+                 p=(a, y), q=(q, next_y), h=h, lineKind='secant' if h else 'tangent',
+                 slope=slope, reference=reference, caption=beat.get('caption') if frame >= beat['cueFrame'] else None)
 
 
 def validate(raw):
@@ -117,9 +153,9 @@ def validate(raw):
     unit = line(graph['slopeUnit'], 14) if 'slopeUnit' in graph else None
     expr = graph_ast(graph['expression'])
     if expr[0] == 'piece':
-        point, before = expr[1][0]
+        _, point, before, after = expr
         require(start < point < end, 'Piecewise breakpoint must lie inside the domain.')
-        first, second = value_and_derivative(before, point), value_and_derivative(expr[2], point)
+        first, second = value_and_derivative(before, point), value_and_derivative(after, point)
         require(all(math.isclose(a, b, rel_tol=1e-8, abs_tol=1e-8) for a, b in zip(first, second)),
                 'Piecewise value and first derivative must match at the breakpoint.')
         bounded(*first, *second)
@@ -130,17 +166,20 @@ def validate(raw):
         bounded(y, slope)
         samples.append((x, y))
     if expr[0] == 'piece':
-        x = expr[1][0][0]
+        x = expr[1]
         samples.append((x, value_and_derivative(expr, x)[0]))
         samples.sort()
     beats = []
     for index, beat in enumerate(array(raw['beats'], 5, 8)):
         fields(beat, ('startFrame', 'settleFrame', 'cueFrame', 'a', 'h', 'camera', 'display', 'narration'),
-               ('reference', 'caption'))
+               ('reference', 'caption', 'narrationScope'))
         first, settle, cue = (integer(beat[key], 0, duration * FPS - 1) for key in ('startFrame', 'settleFrame', 'cueFrame'))
-        require((first == settle == 0 if index == 0 else beats[-1]['startFrame'] < first and
-                 beats[-1]['cueFrame'] + 9 < first) and first <= settle <= first + 150 and settle + 12 <= cue,
-                'Beat frames violate the start, settle or narration cue rules.')
+        previous = beats[-1] if beats else None
+        require(first == settle == 0 if previous is None else previous['startFrame'] < first and
+                previous['cueFrame'] + 9 < first and previous['settleFrame'] < first,
+                'Beat frames must increase and leave room for the preceding beat.')
+        scope = beat.get('narrationScope', 'settled')
+        require(scope in ('settled', 'process'), 'Unknown narration scope.')
         a, h = coordinate(beat['a']), coordinate(beat['h'])
         require(start <= a <= end and start <= a + h <= end, 'Points must be within the graph domain.')
         require(h == 0 or abs(h) >= 0.0001, 'A nonzero authored h must have magnitude at least 0.0001.')
@@ -148,9 +187,17 @@ def validate(raw):
         display = beat['display']
         require(display in DISPLAYS and compatible(display, h), 'Display is incompatible with the signed interval.')
         camera = viewport(beat['camera'])
+        if scope == 'process':
+            moves = previous is not None and (camera != previous['camera'] or
+                (previous['display'] != 'function' and (a != previous['a'] or h != previous['h'])))
+            require(moves and first < cue <= settle - 12 and settle <= first + 300,
+                    'Process narration requires visible motion and a cue before settling.')
+        else:
+            require(first <= settle <= first + 150 and settle + 12 <= cue,
+                    'Settled narration requires a cue at least 12 frames after settling.')
         refs = [a, a + h]
         entry = dict(startFrame=first, settleFrame=settle, cueFrame=cue, a=a, h=h, camera=camera,
-                     display=display, narration=line(beat['narration'], 340))
+                     display=display, narration=line(beat['narration'], 340), narrationScope=scope)
         require(('reference' in beat) == (display == 'compare'), 'Only comparison beats take a reference.')
         if 'reference' in beat:
             ref = coordinate(beat['reference'])

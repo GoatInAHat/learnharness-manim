@@ -6,8 +6,11 @@
   "engines": { "node": ">=22" },
   "scripts": {
     "build": "node scripts/build.mjs",
+    "package": "npm run build && node scripts/package.mjs",
     "typecheck": "tsc --noEmit",
+    "pretest": "npm run build",
     "test": "node --test scripts/*.test.mjs",
+    "test:native": "node scripts/test-native.mjs",
     "cli": "node dist/cli.cjs"
   },
   "devDependencies": {
