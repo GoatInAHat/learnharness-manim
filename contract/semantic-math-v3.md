@@ -25,3 +25,5 @@ A compiled frame supplies the frame index, active beat, cue and effective narrat
 ## Comparison audio
 
 A separately authored master WAV is mono, signed 16-bit integer PCM at 16–48 kHz. Time zero is video frame zero. Pad with silence around utterances at their specified cues and through the final frame. No executable content belongs in the plan. The WAV stays separate from the JSON and may be supplied to either local renderer. Renderers can also synthesize each utterance at its cue from the same plan.
+
+For automatic Sesame reference narration, Manim may adjust the beat boundaries in its render copy to fit the measured utterances. Motion lengths and cue offsets within each beat are preserved, and the adjusted plan follows the same timing rules. An utterance that reaches the synthesis limit or cannot fit in the 120-second scene limit requires shorter narration.

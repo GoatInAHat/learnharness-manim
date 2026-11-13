@@ -23,6 +23,7 @@ export interface Status {
   install: string | null;
   voiceReady: boolean;
   referenceVoiceEnabled: boolean;
+  referenceVoiceReady: boolean;
   voiceDownloadMiB: number | null;
   setupKey: string;
   jobs: JobView[];

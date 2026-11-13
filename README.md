@@ -2,7 +2,7 @@
 
 Manim Explainer renders calculus lessons as local MP4s. It speaks the narration in a [semantic math scene v3 plan](contract/semantic-math-v3.md) using an offline English voice by default. You can choose a silent video or supply a cue-aligned WAV. The lesson renderer uses Manim Community, Cairo and Typst. You can also draft a plan with a model available in LearnHarness.
 
-Version 0.2.0 adds optional managed Qwen3-TTS reference narration. Earlier Sesame CSM experiments were private trials. The macOS Apple Silicon runtime and packaged renderer have been exercised locally; see the qualification workflow for Windows and Linux results.
+Version 0.3.0 uses Sesame CSM for optional reference narration on Apple Silicon. The macOS Apple Silicon Manim runtime and packaged renderer have been exercised locally. See the qualification workflow for Windows and Linux results.
 
 ## Install and render
 
@@ -13,7 +13,7 @@ Version 0.2.0 adds optional managed Qwen3-TTS reference narration. Earlier Sesam
 
 Import, validation and rendering run locally. **Draft plan** sends the brief and public contract to your selected LearnHarness model and may incur provider charges. The resulting JSON goes through the same validator as an imported plan.
 
-Automatic narration uses a fixed offline English voice by default and needs no account or speech API. Each utterance is measured and starts at its cue frame. If it cannot finish nine frames before the next beat (or the end of the lesson), the render fails with the beat number. Shorten that utterance or move its cue within the plan's timing rules.
+Automatic narration uses a fixed offline English voice by default and needs no account or speech API. Each utterance starts at its cue frame. The stock voice requires each utterance to finish nine frames before the next beat or the end of the lesson. If a beat overruns, shorten the utterance or move its cue within the plan's timing rules.
 
 ## Optional local reference voice
 
@@ -21,16 +21,25 @@ On Apple Silicon with macOS 14 or later, first run **Set up local rendering** in
 Manim Explainer. Choose **Silent video** for that setup if you only want to
 download the renderer. Then open **Manim Explainer → Settings** and
 choose a WAV you have permission to synthesize. Use 3–30 seconds of mono 24 kHz
-PCM16 speech and enter its exact transcript. Select **Download and enable reference
-voice**. The one-time setup downloads about 2.2 GB into this plugin's private data,
-reuses Manim's pinned Python, and runs a synthesis check. You can cancel setup. If the local runtime is damaged, select **Reinstall reference
-voice** in the same settings. The replacement is staged and checked before the
-plugin swaps it in.
+PCM16 speech and enter its exact transcript. Select **Download and enable Sesame**.
+The one-time setup downloads about 2.3 GB into this plugin's private data, uses
+Manim's pinned Python, and runs a synthesis check. You can cancel setup. Use
+**Reinstall Sesame** if the runtime is damaged. The plugin checks the staged
+replacement before swapping it in. Upgrades can use the WAV and transcript already
+saved by version 0.2.x. The prior Qwen runtime files remain in the data folder.
 
 Automatic rendering from the teacher tool and the Manim view then uses your
 reference voice. Clear the checkbox and save to return to the stock voice. Remove
 the profile to clear its sample and transcript. The installed model stays available
 for the next profile. The voice sample, transcript and synthesis stay on this Mac.
+
+Sesame uses the reference audio and transcript as speaker context. Write narration
+in natural spoken English, with quantities and units spelled out where they help
+pronunciation. Phrasing and punctuation can suggest rhythm, and delivery and wording
+may vary. The renderer measures the generated speech and adjusts beat boundaries
+when necessary, preserving motion, cue offsets and the 120-second limit. Manim's
+[narration guidance](skills/manim-narration/SKILL.md) is included in Draft plan and in
+teacher and practice prompts while Manim Explainer is enabled.
 
 ## Runtime and platform evidence
 

@@ -7,11 +7,11 @@ import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep 
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { pathToFileURL } from 'node:url';
-import { readReferenceVoice, referenceRevision, referenceSample, referenceSupported, referenceTranscript, referenceURL } from './reference-voice';
+import { readReferenceVoice, referenceRevision, referenceSample, referenceSources, referenceSupported, referenceTranscript } from './reference-voice';
 import type { ReferenceVoice } from './reference-voice';
 import { VIDEO_BYTES } from './protocol';
 import type { Narration } from './protocol';
-import { emptyNarration, placeUtterance, voiceBinary, voiceConfig, voiceDownloadMiB, voiceModels, voiceModelURL,
+import { alignReferenceNarration, emptyNarration, placeUtterance, readUtterance, voiceBinary, voiceConfig, voiceDownloadMiB, voiceModels, voiceModelURL,
   voiceRelease, voiceRevision } from './voice';
 
 const release = '2.9.0-0';
@@ -193,7 +193,7 @@ const readyFile = 'ready.json';
 const voiceDirectory = `pocket-tts-${voiceRelease}-${voiceRevision.slice(0, 12)}-${voiceConfig.sha.slice(0, 12)}`;
 const voiceRequired = 'Install the offline voice for automatic narration, or choose Silent or a narration WAV.';
 const uvRelease = '0.13.8';
-const referenceRuntime = `qwen-${referenceRevision.slice(0, 12)}-mlx-0.32.4-py314-v1`;
+const referenceRuntime = `sesame-${referenceRevision.slice(0, 12)}-mlx-0.32.4-py314-v1`;
 const voiceCPU = process.arch === 'x64' ? ' (requires an AVX2 CPU)' : '';
 
 async function checkVoiceFiles(folder: string, signal?: AbortSignal) {
@@ -272,7 +272,9 @@ export class Runtime {
 
   async status() {
     const referenceVoice = referenceSupported ? await this.referenceProfile().catch(() => null) : null;
-    return { referenceVoiceEnabled: referenceVoice?.enabled === true, supported: Boolean(binary), platform: binary?.[0] ?? host,
+    return { referenceVoiceEnabled: referenceVoice?.enabled === true,
+      referenceVoiceReady: referenceVoice?.enabled === true && await this.referenceReady(),
+      supported: Boolean(binary), platform: binary?.[0] ?? host,
       downloadMiB: binary?.[3] ?? null, ready: Boolean(await this.ready()), versions,
       voiceReady: !this.voiceInvalid && Boolean(await this.voiceReady()), voiceDownloadMiB, setupKey: await this.setupKey() };
   }
@@ -441,10 +443,16 @@ export class Runtime {
   referenceProfile() { return readReferenceVoice(this.referencePath); }
 
   private async referenceFiles() {
-    const lock = await readFile(this.referenceLock('qwen-model.tsv'), 'utf8');
+    const lock = await readFile(this.referenceLock('sesame-model.tsv'), 'utf8');
     return lock.trim().split('\n').map(line => {
-      const [file, size, sha] = line.split('\t');
-      return { file, size: Number(size), sha };
+      const [file, bytes, sha, extra] = line.split('\t');
+      const [group, name] = file.split('/');
+      const size = Number(bytes);
+      if (extra !== undefined || !Object.hasOwn(referenceSources, group) || !/^[a-zA-Z0-9_.-]+\.(json|safetensors)$/.test(name ?? '') ||
+          file !== `${group}/${name}` || !Number.isSafeInteger(size) || size <= 0 || !/^[a-f0-9]{64}$/.test(sha ?? '')) {
+        throw new Error('Invalid bundled Sesame model lock.');
+      }
+      return { file, name, size, sha, source: referenceSources[group as keyof typeof referenceSources] };
     });
   }
 
@@ -456,11 +464,11 @@ export class Runtime {
 
   private async checkReferenceAssets() {
     try {
-      for (const name of ['', 'model', 'model/speech_tokenizer', 'site', 'site/mlx', 'site/mlx_audio', 'site/transformers']) {
+      for (const name of ['', 'model', 'model/csm', 'model/mimi', 'model/tokenizer', 'site', 'site/mlx', 'site/mlx_audio', 'site/transformers']) {
         if (!(await lstat(join(this.referenceRoot, name))).isDirectory()) return false;
       }
       for (const name of ['mlx/core.cpython-314-darwin.so', 'mlx/lib/libmlx.dylib', 'mlx/lib/mlx.metallib',
-        'mlx_audio/tts/models/qwen3_tts/qwen3_tts.py', 'safetensors/_safetensors_rust.abi3.so', 'tokenizers/tokenizers.abi3.so']) {
+        'mlx_audio/tts/models/sesame/sesame.py', 'safetensors/_safetensors_rust.abi3.so', 'tokenizers/tokenizers.abi3.so']) {
         const file = await lstat(join(this.referenceRoot, 'site', name));
         if (!file.isFile() || file.size === 0) return false;
       }
@@ -502,17 +510,17 @@ export class Runtime {
       const site = join(install, 'site');
       progress('Installing verified MLX packages into Manim plugin data.');
       await run(uv, ['--no-config', '--no-cache', '--no-progress', 'pip', 'sync', '--python', manim.python,
-        '--target', site, '--only-binary', ':all:', '--require-hashes', this.referenceLock('qwen-osx-arm64.txt')],
+        '--target', site, '--only-binary', ':all:', '--require-hashes', this.referenceLock('mlx-osx-arm64.txt')],
         staging, env, signal, 'Reference voice packages');
       await run(manim.python, ['-I', '-B', '-c',
         "import sys; sys.path.insert(0, sys.argv[1]); import mlx.core as mx; assert mx.metal.is_available() and mx.default_device() == mx.gpu", site],
         staging, env, signal, 'Reference voice Metal verification');
       const model = await privateDirectory(join(install, 'model'));
-      await privateDirectory(join(model, 'speech_tokenizer'));
+      for (const group of Object.keys(referenceSources)) await privateDirectory(join(model, group));
       const files = await this.referenceFiles();
-      for (const [index, { file, size, sha }] of files.entries()) {
-        progress(`Downloading and verifying reference voice file ${index + 1} of ${files.length}.`);
-        await download(`${referenceURL}/${file}?download=true`, join(model, file), sha, size, signal, true);
+      for (const [index, { file, name, source, size, sha }] of files.entries()) {
+        progress(`Downloading and verifying Sesame voice file ${index + 1} of ${files.length}.`);
+        await download(`https://huggingface.co/${source}/${name}?download=true`, join(model, file), sha, size, signal, true);
       }
       const saved = await this.referenceProfile();
       if (saved?.enabled) {
@@ -581,7 +589,7 @@ export class Runtime {
 
   private async synthesizeReference(profile: ReferenceVoice, scratch: string, utterances: string[], signal: AbortSignal) {
     const manim = await this.ready();
-    if (!manim || !await this.referenceReady()) throw new Error('The local reference voice runtime is unavailable. Set it up in Manim settings.');
+    if (!manim || !await this.referenceReady()) throw new Error('Set up the local Sesame reference voice in Manim settings.');
     if (this.switchingReference) throw new Error('Wait for reference voice setup to finish.');
     this.activeReferenceRuns++;
     try {
@@ -599,9 +607,10 @@ export class Runtime {
       await writeFile(wav, referenceSample(profile.sample), { flag: 'wx', mode: 0o600, signal });
       await writeFile(request, JSON.stringify({ wav, transcript: profile.transcript, utterances,
         model: join(root, 'model'), sitePackages: join(root, 'site'),
-        modelLock: this.referenceLock('qwen-model.tsv') }), { flag: 'wx', mode: 0o600, signal });
+        modelLock: this.referenceLock('sesame-model.tsv') }), { flag: 'wx', mode: 0o600, signal });
       await run(manim.python, ['-I', '-B', join(this.assets, 'assets', 'renderer', 'reference_voice.py'), request], scratch,
-        { ...environment(scratch, manim.prefix), HF_HUB_OFFLINE: '1', TRANSFORMERS_OFFLINE: '1', HF_HUB_DISABLE_TELEMETRY: '1' },
+        { ...environment(scratch, manim.prefix), HF_HUB_OFFLINE: '1', TRANSFORMERS_OFFLINE: '1',
+          HF_HUB_DISABLE_TELEMETRY: '1', HF_HUB_DISABLE_IMPLICIT_TOKEN: '1', TQDM_DISABLE: '1' },
         signal, 'Reference narration');
     } finally {
       await Promise.allSettled([rm(request, { force: true }), rm(wav, { force: true })]);
@@ -612,15 +621,18 @@ export class Runtime {
     const { duration, beats } = await this.validate(scratch, signal, true);
     const profile = referenceSupported ? await this.referenceProfile() : null;
     if (profile?.enabled) {
-      const wav = emptyNarration(duration);
+      const planFile = join(scratch, 'plan.json');
+      const utteranceFiles = beats.map((_, i) => join(scratch, `reference-beat-${i + 1}.wav`));
       try {
         await this.synthesizeReference(profile, scratch, beats.map(([words]) => words), signal);
-        for (const [index, [, cue, end]] of beats.entries()) {
-          await placeUtterance(wav, join(scratch, `reference-beat-${index + 1}.wav`), index + 1, cue, end);
-        }
+        const audio = await Promise.all(utteranceFiles.map((file, i) => readUtterance(file, i + 1, duration)));
+        const { plan, wav } = alignReferenceNarration(JSON.parse(await readFile(planFile, 'utf8')), audio);
+        signal.throwIfAborted();
+        await writeFile(planFile, JSON.stringify(plan), { mode: 0o600, signal });
+        await this.validate(scratch, signal);
         await writeFile(join(scratch, 'narration.wav'), wav, { flag: 'wx', mode: 0o600, signal });
       } finally {
-        await Promise.allSettled(beats.map((_, i) => rm(join(scratch, `reference-beat-${i + 1}.wav`), { force: true })));
+        await Promise.allSettled(utteranceFiles.map(file => rm(file, { force: true })));
       }
       return;
     }

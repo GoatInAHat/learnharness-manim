@@ -1,33 +1,35 @@
-"""Run the optional local Qwen reference voice with no model downloads."""
+"""Generate one offline Sesame CSM utterance per Manim beat."""
 import hashlib
 import importlib.metadata
 import json
 import os
 from pathlib import Path
 import sys
+from unittest.mock import patch
 import wave
 
-MAX_TOKENS = 340
 RATE = 24000
+MAX_AUDIO_MS = 24000
+SEED = 20261113
+MIMI_FILE = 'tokenizer-e351c8d8-checkpoint125.safetensors'
+SESAME_SOURCE_SHA = '56b56a00e026e74077ee5f740eb8418a642b74dad489d66bb58444f61158d99d'
 
 
-def main(request_path):
-    os.umask(0o077)
-    request = json.loads(request_path.read_text())
-    model_path = Path(request['model'])
-    wav_path = Path(request['wav'])
-    # Check the local assets before importing ML libraries or initializing Metal.
-    for row in Path(request['modelLock']).read_text().splitlines():
-        filename, size, expected = row.split('\t')
-        file = model_path / filename
-        if not file.is_file() or file.stat().st_size != int(size):
-            raise ValueError('Reference voice model snapshot is incomplete.')
-        with file.open('rb') as source:
-            if hashlib.file_digest(source, 'sha256').hexdigest() != expected:
-                raise ValueError('Reference voice model snapshot failed verification.')
-    if not wav_path.is_file() or wav_path.stat().st_size > 30 * RATE * 2 + 4096:
+def sha256(path):
+    with path.open('rb') as source:
+        return hashlib.file_digest(source, 'sha256').hexdigest()
+
+
+def block_network(event, _args):
+    if event in {'socket.connect', 'socket.getaddrinfo', 'socket.gethostbyname',
+                 'socket.gethostbyaddr', 'socket.getnameinfo', 'socket.sendto'}:
+        raise PermissionError('Reference narration runs offline.')
+
+
+def read_reference(path):
+    if not path.is_file() or path.stat().st_size > 30 * RATE * 2 + 4096:
         raise ValueError('Reference WAV must be a regular file no longer than 30 seconds.')
-    with wave.open(str(wav_path), 'rb') as audio:
+    with wave.open(str(path), 'rb') as audio:
         if (audio.getnchannels(), audio.getsampwidth(), audio.getframerate()) != (1, 2, RATE):
             raise ValueError('Reference WAV needs mono 24 kHz PCM16.')
         frames = audio.getnframes()
@@ -36,35 +38,89 @@ def main(request_path):
         pcm = audio.readframes(frames)
         if len(pcm) != frames * 2:
             raise ValueError('Reference WAV is truncated.')
+    return pcm
+
+
+def load_model(path, mx):
+    from mlx_audio.codec.models.mimi import mimi
+    from mlx_audio.tts.models.sesame import sesame
+    from mlx_audio.utils import apply_quantization
+
+    config = json.loads((path / 'csm/config.json').read_text())
+    config['use_default_voice_prompt'] = False
+    from_pretrained = sesame.AutoTokenizer.from_pretrained
+
+    def local_tokenizer(repo):
+        if repo != sesame.TOKENIZER_REPO:
+            raise ValueError('Unexpected Sesame tokenizer request.')
+        return from_pretrained(str(path / 'tokenizer'), local_files_only=True, trust_remote_code=False)
+
+    def local_mimi(repo, filename):
+        if (repo, filename) != (sesame.MIMI_REPO, MIMI_FILE):
+            raise ValueError('Unexpected Mimi weight request.')
+        return str(path / 'mimi' / filename)
+
+    with patch.object(sesame.AutoTokenizer, 'from_pretrained', local_tokenizer), \
+            patch.object(mimi, 'hf_hub_download', local_mimi):
+        model = sesame.Model(config)
+    weights = model.sanitize(mx.load(str(path / 'csm/model.safetensors')))
+    apply_quantization(model, config, weights, model.model_quant_predicate)
+    # Mimi's own loader checked its codec weights separately.
+    if any(not key.startswith('model.') for key in weights):
+        raise ValueError('Unexpected Sesame checkpoint keys.')
+    model.model.load_weights([(key.removeprefix('model.'), value) for key, value in weights.items()], strict=True)
+    model.eval()
+    mx.eval(model.parameters())
+    return model
+
+
+def main(request_path):
+    os.umask(0o077)
+    sys.addaudithook(block_network)
+    request = json.loads(request_path.read_text())
+    model_path = Path(request['model'])
+    for row in Path(request['modelLock']).read_text().splitlines():
+        filename, size, expected = row.split('\t')
+        file = model_path / filename
+        if not file.is_file() or file.stat().st_size != int(size) or sha256(file) != expected:
+            raise ValueError('Local Sesame model files are incomplete or failed verification.')
+    pcm = read_reference(Path(request['wav']))
     sys.path.insert(0, request['sitePackages'])
-    if importlib.metadata.version('mlx-audio') != '0.6.5':
-        raise ValueError('Install MLX Audio 0.6.5 in the selected Python environment.')
+    distribution = importlib.metadata.distribution('mlx-audio')
+    if (distribution.version != '0.6.5' or sha256(distribution.locate_file('mlx_audio/tts/models/sesame/sesame.py'))
+            != SESAME_SOURCE_SHA):
+        raise ValueError('Reinstall the verified Sesame voice runtime in Manim settings.')
     import mlx.core as mx
     import numpy as np
-    from mlx_audio.tts.utils import load_model
+    from mlx_audio.lm.sample_utils import make_sampler
 
-    if mx.default_device() != mx.gpu or not mx.metal.is_available():
-        raise ValueError('Reference narration requires a working MLX Metal environment.')
+    if mx.__version__ != '0.32.4' or mx.default_device() != mx.gpu or not mx.metal.is_available():
+        raise ValueError('Reference narration requires the pinned MLX Metal runtime.')
     reference = np.frombuffer(pcm, dtype='<i2').astype(np.float32) / 32768
-    # Match the TypeScript upload check: 1% of full-scale PCM16 rounds up to 328.
     if np.max(np.abs(reference)) < 328 / 32768:
         raise ValueError('Reference WAV is silent or too quiet.')
-    model = load_model(str(model_path))
-    if model.config.tts_model_type != 'base' or not model.speech_tokenizer.has_encoder:
-        raise ValueError('The reference voice needs the Qwen Base model and speech encoder.')
+    reference = mx.array(reference)
+    model = load_model(model_path, mx)
+    sampler = make_sampler(temp=0.9, top_k=50)
     for i, words in enumerate(request['utterances'], 1):
-        mx.random.seed(7211 + i)
-        parts = list(model.generate(text=words, lang_code='English', ref_audio=mx.array(reference),
-                                    ref_text=request['transcript'], max_tokens=MAX_TOKENS))
-        if not parts or any(part.token_count >= MAX_TOKENS for part in parts):
-            raise ValueError(f'Reference narration beat {i} did not finish.')
-        samples = np.concatenate([np.asarray(part.audio, dtype=np.float32) for part in parts])
+        mx.random.seed(SEED + i)
+        # MLX Audio 0.6.5 resets this state only in streaming mode, but uses
+        # the same incremental Mimi decoder for full-utterance generation.
+        model._streaming_decoder.reset()
+        parts = list(model.generate(words, speaker=0, split_pattern=None, voice_match=True,
+                                    ref_audio=reference, ref_text=request['transcript'], sampler=sampler,
+                                    max_audio_length_ms=MAX_AUDIO_MS))
+        if len(parts) != 1 or parts[0].token_count >= MAX_AUDIO_MS // 80:
+            raise ValueError(f'Sesame narration beat {i} did not finish. Shorten that beat’s narration.')
+        samples = np.asarray(parts[0].audio, dtype=np.float32)
         peak = np.max(np.abs(samples), initial=0)
-        if not np.isfinite(samples).all() or not 0.01 <= peak < 1 or model.sample_rate != RATE:
-            raise ValueError(f'Reference narration beat {i} did not produce clean PCM.')
+        if parts[0].sample_rate != RATE or samples.ndim != 1 or not np.isfinite(samples).all() or peak < 0.01:
+            raise ValueError(f'Sesame narration beat {i} did not produce audible mono PCM.')
+        # Leave one decibel of headroom without changing the duration.
+        gain = 10 ** (-1 / 20) / peak
         with wave.open(str(request_path.parent / f'reference-beat-{i}.wav'), 'wb') as wav:
             wav.setparams((1, 2, RATE, 0, 'NONE', 'not compressed'))
-            wav.writeframes((samples * 32767).round().astype('<i2').tobytes())
+            wav.writeframes((samples * gain * 32767).round().astype('<i2').tobytes())
 
 
 if __name__ == '__main__':

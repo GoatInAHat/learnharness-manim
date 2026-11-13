@@ -14,7 +14,10 @@ interface Installation {
   progress: string;
 }
 
-export const activate: PluginBackendModule['activate'] = (ctx) => {
+export const activate: PluginBackendModule['activate'] = async (ctx) => {
+  const skill = await readFile(join(ctx.directory, 'assets', 'skills', 'manim-narration', 'SKILL.md'), 'utf8');
+  const guidance = skill.replaceAll('\r\n', '\n').replace(/^---\n[\s\S]*?\n---\n/, '').trim();
+  ctx.signal.throwIfAborted();
   const runtime = new Runtime(ctx.directory, ctx.dataDirectory);
   const scratch = join(ctx.dataDirectory, 'manim-jobs');
   const jobs = new Jobs(scratch, runtime, ctx.signal);
@@ -25,6 +28,7 @@ export const activate: PluginBackendModule['activate'] = (ctx) => {
   const drafts = new Map<string, AbortController>();
   const nativeAgents = ['teacher', 'practice'] as const;
 
+  ctx.cleanup(ctx.registerInstructions({ agents: [...nativeAgents], text: guidance }));
   ctx.cleanup(async () => {
     installation?.abort.abort(new Error('Installation cancelled.'));
     checkingVoice?.abort(new Error('Reference voice check cancelled.'));
@@ -152,7 +156,7 @@ export const activate: PluginBackendModule['activate'] = (ctx) => {
       const result = await ctx.inference.complete({
         model, purpose: 'user', signal, options: { maxTokens: 5200, maxRetries: 0 },
         context: {
-          systemPrompt: `Draft a bounded declarative teaching scene matching the supplied public contract. Return only JSON, with no code or fences. Start from a simple curve that fits the full scene.\n\n${contract}\n\n${schema}`,
+          systemPrompt: `Draft a bounded declarative teaching scene matching the supplied public contract. Return only JSON, with no code or fences. Start from a simple curve that fits the full scene.\n\n${guidance}\n\n${contract}\n\n${schema}`,
           messages: [{ role: 'user', content: brief, timestamp: Date.now() }],
         },
       });
@@ -173,7 +177,7 @@ export const activate: PluginBackendModule['activate'] = (ctx) => {
     agents: [...nativeAgents],
     create: () => [{
       name: 'manim_render_lesson', label: 'Render Manim lesson',
-      description: 'Render an already validated semantic math scene v3 JSON plan. Requires the local runtime and defaults to automatic narration with the installed offline voice. Use silent only when requested. Find completed videos under Recent lessons in Manim Explainer.',
+      description: 'Render a semantic math scene v3 JSON plan. Requires the local runtime and defaults to automatic narration, using Sesame when the reference voice is enabled. Use silent only when requested. Find completed videos under Recent lessons in Manim Explainer.',
       parameters: Type.Object({ plan: Type.String({ minLength: 1, maxLength: PLAN_BYTES }),
         narration: Type.Optional(Type.Union([Type.Literal('automatic'), Type.Literal('silent')])) }, { additionalProperties: false }),
       async execute(_call, input, signal) {
