@@ -71,6 +71,7 @@ test('reference profile validates inputs, survives restart, and is removable', a
   const folder = await scratch(t);
   const runtime = new Runtime(folder, folder);
   const wav = emptyNarration(120);
+  wav.writeInt16LE(-328, 44);
   const profile = { sample: wav.toString('base64'), transcript: 'This is an authorized fixture.', enabled: false };
   const signal = new AbortController().signal;
   const saved = { enabled: false, transcript: profile.transcript };
@@ -106,6 +107,14 @@ test('invalid reference WAVs fail before setup or staging', async (t) => {
     await assert.rejects(runtime.saveReferenceProfile({
       sample: wav.toString('base64'), transcript: 'This is an authorized fixture.', enabled: true,
     }, signal), /Choose a mono/);
+  }
+  const silent = emptyNarration(120);
+  const nearSilent = emptyNarration(120);
+  nearSilent.writeInt16LE(-327, 44);
+  for (const wav of [silent, nearSilent]) {
+    await assert.rejects(runtime.saveReferenceProfile({
+      sample: wav.toString('base64'), transcript: 'This is an authorized fixture.', enabled: true,
+    }, signal), /silent or too quiet/);
   }
   assert.equal(setups, 0);
   assert.deepEqual(await readdir(folder), []);

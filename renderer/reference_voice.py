@@ -46,7 +46,8 @@ def main(request_path):
     if mx.default_device() != mx.gpu or not mx.metal.is_available():
         raise ValueError('Reference narration requires a working MLX Metal environment.')
     reference = np.frombuffer(pcm, dtype='<i2').astype(np.float32) / 32768
-    if np.max(np.abs(reference)) < 0.01:
+    # Match the TypeScript upload check: 1% of full-scale PCM16 rounds up to 328.
+    if np.max(np.abs(reference)) < 328 / 32768:
         raise ValueError('Reference WAV is silent or too quiet.')
     model = load_model(str(model_path))
     if model.config.tts_model_type != 'base' or not model.speech_tokenizer.has_encoder:

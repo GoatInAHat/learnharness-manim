@@ -26,6 +26,8 @@ export function referenceSample(raw: unknown) {
   if (audio.length < 44 || audio.length > referenceWavBytes || audio.toString('base64') !== raw ||
       audio.subarray(0, 4).toString() !== 'RIFF' || audio.subarray(8, 12).toString() !== 'WAVE' ||
       audio.readUInt32LE(4) !== audio.length - 8) throw invalid();
+  // Match the Python check: 1% of 32768 requires an integer peak of at least 328.
+  const minimumPeak = 328;
   let format = false;
   let data = false;
   for (let offset = 12; offset < audio.length;) {
@@ -43,6 +45,14 @@ export function referenceSample(raw: unknown) {
       format = true;
     } else if (chunk === 'data') {
       if (!format || data || size % 2 || size < 3 * 48000 || size > 30 * 48000) throw invalid();
+      let audible = false;
+      for (let sample = start; sample < start + size; sample += 2) {
+        if (Math.abs(audio.readInt16LE(sample)) >= minimumPeak) {
+          audible = true;
+          break;
+        }
+      }
+      if (!audible) throw new Error('Reference WAV is silent or too quiet.');
       data = true;
     }
   }
