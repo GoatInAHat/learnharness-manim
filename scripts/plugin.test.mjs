@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { join, relative, sep } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import { test } from 'node:test';
 import { bundleTestModule } from './bundle-test-module.mjs';
 import { pack, packageFiles, pluginId, zipTool } from './package.mjs';
@@ -34,6 +34,7 @@ test('standalone package extracts to the LearnHarness plugin layout and activate
   const manifest = JSON.parse(await readFile(join(dist, 'manifest.json'), 'utf8'));
   assert.equal(manifest.id, pluginId);
   assert.equal(manifest.apiVersion, 1);
+  assert.equal(manifest.version, '0.2.0');
   assert.equal(manifest.minAppVersion, '0.6.0');
   for (const file of [manifest.main, manifest.backend, manifest.styles]) assert.ok(packageFiles.includes(file));
   const main = await readFile(join(dist, manifest.main));
@@ -55,6 +56,7 @@ test('standalone package extracts to the LearnHarness plugin layout and activate
   assert.equal(status.ready, false);
   assert.equal(status.install, null);
   assert.equal(status.voiceReady, false);
+  assert.throws(() => operations.get('repairReferenceVoice')({ confirmed: false }), /Confirm the reference voice download/);
   assert.throws(() => operations.get('install')({ confirmed: 'true', narration: 'automatic' }), /Confirm the local setup download/);
   assert.throws(() => operations.get('install')({ confirmed: true, narration: 'unexpected' }), /Select a narration option/);
   assert.throws(() => operations.get('install')({ confirmed: true, narration: 'silent', allowRuntime: false, allowVoice: true }), /Confirm the components/);
@@ -85,6 +87,37 @@ test('reference profile validates inputs, survives restart, and is removable', a
     await reopened.removeReferenceProfile();
     assert.equal(await reopened.referenceProfile(), null);
   }
+});
+
+test('reference readiness detects missing companions and same-size model corruption', {
+  skip: process.platform !== 'darwin' || process.arch !== 'arm64',
+}, async (t) => {
+  const folder = await scratch(t);
+  const lockDir = join(folder, 'assets', 'runtime', 'voice');
+  const root = join(folder, 'voice', 'qwen-50f45ef0047c-mlx-0.32.4-py314-v1');
+  const model = join(root, 'model', 'speech_tokenizer', 'fixture.safetensors');
+  const files = ['mlx/core.cpython-314-darwin.so', 'mlx/lib/libmlx.dylib', 'mlx/lib/mlx.metallib',
+    'mlx_audio/tts/models/qwen3_tts/qwen3_tts.py', 'safetensors/_safetensors_rust.abi3.so', 'tokenizers/tokenizers.abi3.so'];
+  await mkdir(lockDir, { recursive: true });
+  await mkdir(join(root, 'model', 'speech_tokenizer'), { recursive: true });
+  await mkdir(join(root, 'site', 'transformers'), { recursive: true });
+  for (const file of files) {
+    const path = join(root, 'site', file);
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, 'companion');
+  }
+  const expected = createHash('sha256').update('good').digest('hex');
+  await writeFile(join(lockDir, 'qwen-model.tsv'), `speech_tokenizer/fixture.safetensors\t4\t${expected}\n`);
+  const runtime = new Runtime(folder, folder);
+  assert.equal(await runtime.referenceReady(), false);
+  await writeFile(model, 'good');
+  assert.equal(await runtime.referenceReady(), true);
+  await writeFile(model, 'evil');
+  assert.equal(await runtime.referenceReady(), false);
+  await writeFile(model, 'good');
+  assert.equal(await runtime.referenceReady(), true);
+  await rm(join(root, 'site', files[1]));
+  assert.equal(await runtime.referenceReady(), false);
 });
 
 test('completed lessons reopen after a new backend and disposing temporary jobs never deletes them', async (t) => {

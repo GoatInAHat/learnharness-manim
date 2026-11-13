@@ -43,7 +43,7 @@ export const activate: PluginBackendModule['activate'] = (ctx) => {
     return { profile: profile ? { enabled: profile.enabled, transcript: profile.transcript } : null,
       supported: referenceSupported, ready: await runtime.referenceReady(), progress: voiceProgress ?? null };
   }));
-  ctx.cleanup(ctx.handle('saveReferenceProfile', (raw) => {
+  function checkVoice<T>(work: (signal: AbortSignal, progress: (message: string) => void) => Promise<T>) {
     if (checkingVoice) throw new Error('A reference voice check is already running.');
     if (installation) throw new Error('Wait for local setup to finish.');
     ctx.signal.throwIfAborted();
@@ -51,9 +51,16 @@ export const activate: PluginBackendModule['activate'] = (ctx) => {
     checkingVoice = abort;
     const signal = AbortSignal.any([ctx.signal, abort.signal, AbortSignal.timeout(20 * 60 * 1000)]);
     voiceProgress = 'Preparing the reference voice…';
-    voiceWork = runtime.saveReferenceProfile(raw, signal, message => { voiceProgress = message; })
+    const task = work(signal, message => { voiceProgress = message; })
       .finally(() => { checkingVoice = undefined; voiceProgress = undefined; });
-    return voiceWork;
+    voiceWork = task;
+    return task;
+  }
+  ctx.cleanup(ctx.handle('saveReferenceProfile', raw =>
+    checkVoice((signal, progress) => runtime.saveReferenceProfile(raw, signal, progress))));
+  ctx.cleanup(ctx.handle('repairReferenceVoice', raw => {
+    if (object(raw).confirmed !== true) throw new Error('Confirm the reference voice download first.');
+    return checkVoice((signal, progress) => runtime.installReference(signal, progress, true));
   }));
   ctx.cleanup(ctx.handle('cancelReferenceCheck', () => {
     checkingVoice?.abort(new Error('Reference voice check cancelled.'));

@@ -218,6 +218,10 @@ async function runtimeFile(prefix: string, path: string) {
 
 export class Runtime {
   private voiceInvalid = false;
+  private referenceChecks = new Map<string, string>();
+  private referenceCheck?: Promise<boolean>;
+  private activeReferenceRuns = 0;
+  private switchingReference = false;
   constructor(private readonly assets: string, private readonly data: string) {}
 
   async setupKey() {
@@ -436,23 +440,51 @@ export class Runtime {
 
   referenceProfile() { return readReferenceVoice(this.referencePath); }
 
+  private async referenceFiles() {
+    const lock = await readFile(this.referenceLock('qwen-model.tsv'), 'utf8');
+    return lock.trim().split('\n').map(line => {
+      const [file, size, sha] = line.split('\t');
+      return { file, size: Number(size), sha };
+    });
+  }
+
   async referenceReady() {
-    if (!referenceSupported) return false;
+    if (!referenceSupported || this.switchingReference) return false;
+    this.referenceCheck ??= this.checkReferenceAssets().finally(() => { this.referenceCheck = undefined; });
+    return this.referenceCheck;
+  }
+
+  private async checkReferenceAssets() {
     try {
-      return (await lstat(this.referenceRoot)).isDirectory() &&
-        (await lstat(join(this.referenceRoot, 'site', 'mlx'))).isDirectory() &&
-        (await lstat(join(this.referenceRoot, 'model', 'config.json'))).isFile();
+      for (const name of ['', 'model', 'model/speech_tokenizer', 'site', 'site/mlx', 'site/mlx_audio', 'site/transformers']) {
+        if (!(await lstat(join(this.referenceRoot, name))).isDirectory()) return false;
+      }
+      for (const name of ['mlx/core.cpython-314-darwin.so', 'mlx/lib/libmlx.dylib', 'mlx/lib/mlx.metallib',
+        'mlx_audio/tts/models/qwen3_tts/qwen3_tts.py', 'safetensors/_safetensors_rust.abi3.so', 'tokenizers/tokenizers.abi3.so']) {
+        const file = await lstat(join(this.referenceRoot, 'site', name));
+        if (!file.isFile() || file.size === 0) return false;
+      }
+      for (const { file, size, sha } of await this.referenceFiles()) {
+        const path = join(this.referenceRoot, 'model', file);
+        const stat = await lstat(path, { bigint: true });
+        if (!stat.isFile() || stat.size !== BigInt(size)) return false;
+        const fingerprint = [sha, stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(':');
+        if (this.referenceChecks.get(path) === fingerprint) continue;
+        if (await digest(path) !== sha) return false;
+        this.referenceChecks.set(path, fingerprint);
+      }
+      return true;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      if (['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) return false;
       throw error;
     }
   }
 
-  async installReference(signal: AbortSignal, progress: (text: string) => void) {
+  async installReference(signal: AbortSignal, progress: (text: string) => void, force = false) {
     if (!referenceSupported) {
       throw new Error('Reference narration requires Apple Silicon and macOS 14 or later.');
     }
-    if (await this.referenceReady()) return;
+    if (!force && await this.referenceReady()) return;
     if (!await this.ready()) await this.install(signal, progress);
     const manim = await this.ready();
     if (!manim) throw new Error('Set up local rendering before enabling the reference voice.');
@@ -478,15 +510,40 @@ export class Runtime {
         staging, env, signal, 'Reference voice Metal verification');
       const model = await privateDirectory(join(install, 'model'));
       await privateDirectory(join(model, 'speech_tokenizer'));
-      const lock = await readFile(this.referenceLock('qwen-model.tsv'), 'utf8');
-      const files = lock.trim().split('\n');
-      for (const [index, line] of files.entries()) {
-        const [file, size, sha] = line.split('\t');
+      const files = await this.referenceFiles();
+      for (const [index, { file, size, sha }] of files.entries()) {
         progress(`Downloading and verifying reference voice file ${index + 1} of ${files.length}.`);
-        await download(`${referenceURL}/${file}?download=true`, join(model, file), sha, Number(size), signal, true);
+        await download(`${referenceURL}/${file}?download=true`, join(model, file), sha, size, signal, true);
+      }
+      const saved = await this.referenceProfile();
+      if (saved?.enabled) {
+        progress('Checking the replacement with your saved reference voice.');
+        await this.runReference(saved, staging, ['This is the local narration voice.'], signal, manim, install);
       }
       signal.throwIfAborted();
-      await rename(install, this.referenceRoot);
+      if (this.activeReferenceRuns) throw new Error('Wait for the current narration to finish before replacing the reference voice.');
+      const previous = join(voices, basename(staging) + '-previous');
+      this.switchingReference = true;
+      let moved = false;
+      try {
+        const existing = await lstat(this.referenceRoot).catch(error => {
+          if (error.code !== 'ENOENT') throw error;
+        });
+        if (existing && !existing.isDirectory()) throw new Error('The reference runtime path is not a regular directory.');
+        if (existing) {
+          await rename(this.referenceRoot, previous);
+          moved = true;
+        }
+        signal.throwIfAborted();
+        await rename(install, this.referenceRoot);
+        this.referenceChecks.clear();
+      } catch (error) {
+        if (moved) await rename(previous, this.referenceRoot);
+        throw error;
+      } finally {
+        this.switchingReference = false;
+      }
+      if (moved) await rm(previous, { recursive: true, force: true }).catch(() => undefined);
     } finally {
       await rm(staging, { recursive: true, force: true });
     }
@@ -526,12 +583,23 @@ export class Runtime {
   private async synthesizeReference(profile: ReferenceVoice, scratch: string, utterances: string[], signal: AbortSignal) {
     const manim = await this.ready();
     if (!manim || !await this.referenceReady()) throw new Error('The local reference voice runtime is unavailable. Set it up in Manim settings.');
+    if (this.switchingReference) throw new Error('Wait for reference voice setup to finish.');
+    this.activeReferenceRuns++;
+    try {
+      await this.runReference(profile, scratch, utterances, signal, manim, this.referenceRoot);
+    } finally {
+      this.activeReferenceRuns--;
+    }
+  }
+
+  private async runReference(profile: ReferenceVoice, scratch: string, utterances: string[], signal: AbortSignal,
+    manim: { python: string; prefix: string }, root: string) {
     const request = join(scratch, 'reference-request.json');
     const wav = join(scratch, 'reference-input.wav');
     try {
       await writeFile(wav, referenceSample(profile.sample), { flag: 'wx', mode: 0o600, signal });
       await writeFile(request, JSON.stringify({ wav, transcript: profile.transcript, utterances,
-        model: join(this.referenceRoot, 'model'), sitePackages: join(this.referenceRoot, 'site'),
+        model: join(root, 'model'), sitePackages: join(root, 'site'),
         modelLock: this.referenceLock('qwen-model.tsv') }), { flag: 'wx', mode: 0o600, signal });
       await run(manim.python, ['-I', '-B', join(this.assets, 'assets', 'renderer', 'reference_voice.py'), request], scratch,
         { ...environment(scratch, manim.prefix), HF_HUB_OFFLINE: '1', TRANSFORMERS_OFFLINE: '1', HF_HUB_DISABLE_TELEMETRY: '1' },

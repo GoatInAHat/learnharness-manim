@@ -23,7 +23,8 @@ export const activate: PluginFrontendModule['activate'] = (ctx) => {
         status.textContent = 'Reference narration is available on Apple Silicon with macOS 14 or later.';
         return;
       }
-      status.textContent = 'Use a WAV you have permission to synthesize. The sample and transcript stay on this Mac.';
+      status.textContent = profile?.enabled && !ready ? 'The reference runtime needs repair. Reinstall it to resume automatic reference narration.' :
+        'Use a WAV you have permission to synthesize. The sample and transcript stay on this Mac.';
       const form = document.createElement('form');
       container.append(form);
       function field(input: HTMLInputElement | HTMLTextAreaElement, title: string) {
@@ -64,7 +65,11 @@ export const activate: PluginFrontendModule['activate'] = (ctx) => {
       cancel.type = 'button';
       cancel.textContent = 'Cancel reference voice setup';
       cancel.hidden = true;
-      form.append(save, remove, cancel);
+      const repair = document.createElement('button');
+      repair.type = 'button';
+      repair.textContent = 'Reinstall reference voice (~2.2 GB)';
+      repair.hidden = !hasProfile && !setupReady;
+      form.append(save, remove, repair, cancel);
       const showError = (error: unknown) => { if (!signal.aborted) status.textContent = (error as Error).message; };
       let checking = false;
       signal.addEventListener('abort', () => {
@@ -72,7 +77,7 @@ export const activate: PluginFrontendModule['activate'] = (ctx) => {
       }, { once: true });
       cancel.addEventListener('click', () => { void ctx.call('cancelReferenceCheck').catch(showError); });
       remove.addEventListener('click', () => {
-        save.disabled = remove.disabled = true;
+        save.disabled = remove.disabled = repair.disabled = true;
         void ctx.call('removeReferenceProfile').then(() => {
           if (signal.aborted) return;
           hasProfile = false;
@@ -81,48 +86,63 @@ export const activate: PluginFrontendModule['activate'] = (ctx) => {
           transcript.value = '';
           enabled.checked = true;
           updateSave();
+          repair.hidden = !setupReady;
           status.textContent = 'Reference voice removed. Automatic narration uses the stock voice.';
-        }).catch((error) => { if (!signal.aborted) remove.disabled = false; showError(error); }).finally(() => { save.disabled = false; });
+        }).catch((error) => { if (!signal.aborted) remove.disabled = false; showError(error); }).finally(() => { save.disabled = repair.disabled = false; });
       });
-      form.addEventListener('submit', (event) => {
-        event.preventDefault();
+      function runVoiceAction(message: string, cancellable: boolean, action: () => Promise<void>) {
         if (checking || save.disabled) return;
-        checking = save.disabled = remove.disabled = true;
-        const requested = enabled.checked;
-        cancel.hidden = !requested;
-        status.textContent = requested ? 'Checking the reference WAV and running local synthesis…' : 'Saving voice settings…';
+        checking = save.disabled = remove.disabled = repair.disabled = true;
+        cancel.hidden = !cancellable;
+        status.textContent = message;
         const timer = setInterval(() => {
           void ctx.call<VoiceSettings>('referenceProfile').then(({ progress }) => {
             if (progress && checking && !signal.aborted) status.textContent = progress;
           }).catch(() => undefined);
         }, 1200);
-        void (async () => {
-          const file = sample.files?.[0];
-          if (file && file.size > 30 * 24000 * 2 + 4096) throw new Error('Choose a WAV with at most 30 seconds of speech.');
-          let encoded: string | undefined;
-          if (file) {
-            const bytes = new Uint8Array(await file.arrayBuffer());
-            let binary = '';
-            for (let offset = 0; offset < bytes.length; offset += 8192) {
-              binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
-            }
-            encoded = btoa(binary);
-          }
-          signal.throwIfAborted();
-          await ctx.call('saveReferenceProfile', { sample: encoded, transcript: transcript.value, enabled: requested });
+        void action().catch(showError).finally(() => {
+          clearInterval(timer);
+          checking = save.disabled = repair.disabled = false;
+          remove.disabled = !hasProfile;
+          repair.hidden = !hasProfile && !setupReady;
+          cancel.hidden = true;
+        });
+      }
+      repair.addEventListener('click', () => {
+        runVoiceAction('Preparing the reference voice reinstall…', true, async () => {
+          await ctx.call('repairReferenceVoice', { confirmed: true });
           if (signal.aborted) return;
-          setupReady ||= requested;
-          hasProfile = true;
-          sample.required = false;
-          sample.value = '';
+          setupReady = true;
           updateSave();
-          status.textContent = requested ? 'Reference voice enabled.' : 'Reference voice disabled.';
-        })().catch((error) => { showError(error); }).finally(() => {
-            clearInterval(timer);
-            checking = save.disabled = false;
-            remove.disabled = !hasProfile;
-            cancel.hidden = true;
-          });
+          status.textContent = 'Reference voice reinstalled.';
+        });
+      });
+      form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        const requested = enabled.checked;
+        runVoiceAction(requested ? 'Checking the reference WAV and running local synthesis…' : 'Saving voice settings…',
+          requested, async () => {
+            const file = sample.files?.[0];
+            if (file && file.size > 30 * 24000 * 2 + 4096) throw new Error('Choose a WAV with at most 30 seconds of speech.');
+            let encoded: string | undefined;
+            if (file) {
+              const bytes = new Uint8Array(await file.arrayBuffer());
+              let binary = '';
+              for (let offset = 0; offset < bytes.length; offset += 8192) {
+                binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
+              }
+              encoded = btoa(binary);
+            }
+            signal.throwIfAborted();
+            await ctx.call('saveReferenceProfile', { sample: encoded, transcript: transcript.value, enabled: requested });
+            if (signal.aborted) return;
+            setupReady ||= requested;
+            hasProfile = true;
+            sample.required = false;
+            sample.value = '';
+            updateSave();
+            status.textContent = requested ? 'Reference voice enabled.' : 'Reference voice disabled.';
+        });
       });
     })().catch((error) => { if (!signal.aborted) status.textContent = (error as Error).message; });
   }

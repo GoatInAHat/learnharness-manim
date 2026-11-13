@@ -2,7 +2,7 @@
 
 Manim Explainer renders calculus lessons as local MP4s. It speaks the narration in a [semantic math scene v3 plan](contract/semantic-math-v3.md) using an offline English voice by default. You can choose a silent video or supply a cue-aligned WAV. The lesson renderer uses Manim Community, Cairo and Typst. You can also draft a plan with a model available in LearnHarness.
 
-This is a source preview. The macOS Apple Silicon runtime and packaged renderer have been exercised locally; see the qualification workflow for Windows and Linux results.
+Version 0.2.0 adds optional managed Qwen3-TTS reference narration. Earlier Sesame CSM experiments were private trials. The macOS Apple Silicon runtime and packaged renderer have been exercised locally; see the qualification workflow for Windows and Linux results.
 
 ## Install and render
 
@@ -21,7 +21,9 @@ On Apple Silicon with macOS 14 or later, open **Manim Explainer → Settings** a
 choose a WAV you have permission to synthesize. Use 3–30 seconds of mono 24 kHz
 PCM16 speech and enter its exact transcript. Select **Download and enable reference
 voice**. The one-time setup downloads about 2.2 GB into this plugin's private data,
-reuses Manim's pinned Python, and runs a synthesis check. You can cancel setup.
+reuses Manim's pinned Python, and runs a synthesis check. You can cancel setup. If the local runtime is damaged, select **Reinstall reference
+voice** in the same settings. The replacement is staged and checked before the
+plugin swaps it in.
 
 Automatic rendering from the teacher tool and the Manim view then uses your
 reference voice. Clear the checkbox and save to return to the stock voice. Remove
