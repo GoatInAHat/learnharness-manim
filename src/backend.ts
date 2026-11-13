@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Type } from 'typebox';
@@ -6,7 +7,7 @@ import { integer, Jobs, object, text } from './jobs';
 import { PLAN_BYTES, SOURCE_PLAN_BYTES } from './protocol';
 import type { DraftModel, Status } from './protocol';
 import { referenceSupported } from './reference-voice';
-import { privateDirectory, run, Runtime } from './runtime';
+import { privateDirectory, Runtime } from './runtime';
 
 interface Installation {
   abort: AbortController;
@@ -121,9 +122,13 @@ export const activate: PluginBackendModule['activate'] = (ctx) => {
     const program = process.platform === 'darwin' ? '/usr/bin/open' :
       process.platform === 'win32' ? 'C:\\Windows\\System32\\rundll32.exe' : 'xdg-open';
     const args = process.platform === 'win32' ? ['url.dll,FileProtocolHandler', video] : [video];
+    ctx.signal.throwIfAborted();
     try {
-      await run(program, args, ctx.dataDirectory, process.env,
-        AbortSignal.any([ctx.signal, AbortSignal.timeout(10_000)]), 'Open video');
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn(program, args, { cwd: ctx.dataDirectory, detached: true, stdio: 'ignore', windowsHide: true });
+        child.once('error', reject);
+        child.once('spawn', () => { child.unref(); resolve(); });
+      });
       return { path: video };
     } catch (error) {
       ctx.signal.throwIfAborted();
