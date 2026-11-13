@@ -13,7 +13,20 @@ This is a source preview. The macOS Apple Silicon runtime and packaged renderer 
 
 Import, validation and rendering run locally. **Draft plan** sends the brief and public contract to your selected LearnHarness model and may incur provider charges. The resulting JSON goes through the same validator as an imported plan.
 
-Automatic narration uses the same fixed, non-cloning English voice for every plan and needs no account or speech API. Each utterance is measured and starts at its cue frame. If it cannot finish nine frames before the next beat (or the end of the lesson), the render fails with the beat number. Shorten that utterance or move its cue within the plan's timing rules.
+Automatic narration uses a fixed offline English voice by default and needs no account or speech API. Each utterance is measured and starts at its cue frame. If it cannot finish nine frames before the next beat (or the end of the lesson), the render fails with the beat number. Shorten that utterance or move its cue within the plan's timing rules.
+
+## Optional local reference voice
+
+On Apple Silicon with macOS 14 or later, open **Manim Explainer → Settings** and
+choose a WAV you have permission to synthesize. Use 3–30 seconds of mono 24 kHz
+PCM16 speech and enter its exact transcript. Select **Download and enable reference
+voice**. The one-time setup downloads about 2.2 GB into this plugin's private data,
+reuses Manim's pinned Python, and runs a synthesis check. You can cancel setup.
+
+Automatic rendering from the teacher tool and the Manim view then uses your
+reference voice. Clear the checkbox and save to return to the stock voice. Remove
+the profile to clear its sample and transcript. The installed model stays available
+for the next profile. The voice sample, transcript and synthesis stay on this Mac.
 
 ## Runtime and platform evidence
 

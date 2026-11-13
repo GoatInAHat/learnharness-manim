@@ -1,11 +1,131 @@
 import type { PluginFrontendModule } from 'learnharness-plugin-api';
 import { CHUNK_BYTES, PLAN_BYTES, VIDEO_BYTES, WAV_BYTES } from './protocol';
+import type { ReferenceVoice } from './reference-voice';
 import type { DraftModel, JobView, Narration, Status } from './protocol';
 
 export const activate: PluginFrontendModule['activate'] = (ctx) => {
   ctx.cleanup(ctx.registerView({ id: 'explainer', name: 'Manim Explainer', mount }));
   ctx.cleanup(ctx.registerAction({ id: 'open-explainer', name: 'Manim Explainer', run: () => ctx.app.openView('explainer') }));
   ctx.cleanup(ctx.placeAction({ id: 'explainer-sidebar', actionId: 'open-explainer', location: 'sidebar' }));
+
+  type VoiceSettings = { profile: Pick<ReferenceVoice, 'enabled' | 'transcript'> | null; supported: boolean; ready: boolean; progress: string | null };
+  ctx.cleanup(ctx.registerSettings(mountReferenceSettings));
+
+  function mountReferenceSettings(container: HTMLElement, signal: AbortSignal) {
+    const status = document.createElement('p');
+    status.setAttribute('role', 'status');
+    status.textContent = 'Checking reference voice settings…';
+    container.append(status);
+    void (async () => {
+      const { profile, ready, supported } = await ctx.call<VoiceSettings>('referenceProfile');
+      if (signal.aborted) return;
+      if (!supported) {
+        status.textContent = 'Reference narration is available on Apple Silicon with macOS 14 or later.';
+        return;
+      }
+      status.textContent = 'Use a WAV you have permission to synthesize. The sample and transcript stay on this Mac.';
+      const form = document.createElement('form');
+      container.append(form);
+      function field(input: HTMLInputElement | HTMLTextAreaElement, title: string) {
+        const label = document.createElement('label');
+        label.append(title, input);
+        const row = document.createElement('div');
+        row.append(label);
+        form.append(row);
+      }
+      const sample = document.createElement('input');
+      sample.type = 'file';
+      sample.accept = '.wav,audio/wav';
+      sample.required = !profile;
+      field(sample, 'Reference WAV (3–30 seconds, mono 24 kHz PCM16)');
+      let setupReady = ready;
+      let hasProfile = Boolean(profile);
+      const transcript = document.createElement('textarea');
+      transcript.rows = 3;
+      transcript.maxLength = 1800;
+      transcript.required = true;
+      transcript.value = profile?.transcript ?? '';
+      field(transcript, 'Exact WAV transcript');
+      const enabled = document.createElement('input');
+      enabled.type = 'checkbox';
+      enabled.checked = profile?.enabled ?? true;
+      field(enabled, 'Use reference voice for automatic narration');
+      const save = document.createElement('button');
+      function updateSave() {
+        save.textContent = enabled.checked && !setupReady ? 'Download and enable reference voice (~2.2 GB)' : 'Save voice profile';
+      }
+      updateSave();
+      enabled.addEventListener('change', updateSave);
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.textContent = 'Remove voice profile';
+      remove.disabled = !profile;
+      const cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.textContent = 'Cancel reference voice setup';
+      cancel.hidden = true;
+      form.append(save, remove, cancel);
+      const showError = (error: unknown) => { if (!signal.aborted) status.textContent = (error as Error).message; };
+      let checking = false;
+      signal.addEventListener('abort', () => {
+        if (checking) void ctx.call('cancelReferenceCheck').catch(() => undefined);
+      }, { once: true });
+      cancel.addEventListener('click', () => { void ctx.call('cancelReferenceCheck').catch(showError); });
+      remove.addEventListener('click', () => {
+        save.disabled = remove.disabled = true;
+        void ctx.call('removeReferenceProfile').then(() => {
+          if (signal.aborted) return;
+          hasProfile = false;
+          sample.value = '';
+          sample.required = true;
+          transcript.value = '';
+          enabled.checked = true;
+          updateSave();
+          status.textContent = 'Reference voice removed. Automatic narration uses the stock voice.';
+        }).catch((error) => { if (!signal.aborted) remove.disabled = false; showError(error); }).finally(() => { save.disabled = false; });
+      });
+      form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        if (checking || save.disabled) return;
+        checking = save.disabled = remove.disabled = true;
+        const requested = enabled.checked;
+        cancel.hidden = !requested;
+        status.textContent = requested ? 'Checking the reference WAV and running local synthesis…' : 'Saving voice settings…';
+        const timer = setInterval(() => {
+          void ctx.call<VoiceSettings>('referenceProfile').then(({ progress }) => {
+            if (progress && checking && !signal.aborted) status.textContent = progress;
+          }).catch(() => undefined);
+        }, 1200);
+        void (async () => {
+          const file = sample.files?.[0];
+          if (file && file.size > 30 * 24000 * 2 + 4096) throw new Error('Choose a WAV with at most 30 seconds of speech.');
+          let encoded: string | undefined;
+          if (file) {
+            const bytes = new Uint8Array(await file.arrayBuffer());
+            let binary = '';
+            for (let offset = 0; offset < bytes.length; offset += 8192) {
+              binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
+            }
+            encoded = btoa(binary);
+          }
+          signal.throwIfAborted();
+          await ctx.call('saveReferenceProfile', { sample: encoded, transcript: transcript.value, enabled: requested });
+          if (signal.aborted) return;
+          setupReady ||= requested;
+          hasProfile = true;
+          sample.required = false;
+          sample.value = '';
+          updateSave();
+          status.textContent = requested ? 'Reference voice enabled.' : 'Reference voice disabled.';
+        })().catch((error) => { showError(error); }).finally(() => {
+            clearInterval(timer);
+            checking = save.disabled = false;
+            remove.disabled = !hasProfile;
+            cancel.hidden = true;
+          });
+      });
+    })().catch((error) => { if (!signal.aborted) status.textContent = (error as Error).message; });
+  }
 
   function mount(container: HTMLElement, signal: AbortSignal) {
     const root = document.createElement('div');
@@ -203,7 +323,7 @@ export const activate: PluginFrontendModule['activate'] = (ctx) => {
     function updateControls() {
       const automatic = narration.value === 'automatic';
       const needsRuntime = Boolean(current?.supported && !current.ready);
-      const needsVoice = automatic && Boolean(current?.voiceDownloadMiB) && !current?.voiceReady;
+      const needsVoice = automatic && !current?.referenceVoiceEnabled && Boolean(current?.voiceDownloadMiB) && !current?.voiceReady;
       const setupKey = current?.setupKey ?? '';
       if (setupScope.allowRuntime !== needsRuntime || setupScope.allowVoice !== needsVoice || setupScope.setupKey !== setupKey) {
         consent.checked = false;
@@ -222,7 +342,7 @@ export const activate: PluginFrontendModule['activate'] = (ctx) => {
       narration.disabled = Boolean(current?.install);
       audioField.hidden = narration.value !== 'wav';
       render.disabled = !current?.ready || Boolean(current.install) || !plan.value.trim() || submitting || current.jobs.some((job) => job.state === 'rendering') ||
-        (automatic && !current.voiceReady) || (narration.value === 'wav' && !audio.files?.[0]);
+        (automatic && !current.voiceReady && !current.referenceVoiceEnabled) || (narration.value === 'wav' && !audio.files?.[0]);
       draft.disabled = !current?.ready || Boolean(drafting) || !brief.value.trim() || !picker.value;
       cancelDraft.hidden = !drafting;
     }
@@ -241,7 +361,8 @@ export const activate: PluginFrontendModule['activate'] = (ctx) => {
         current = status;
         runtimeLine.textContent = status.install || (!status.supported ? `Runtime unavailable for ${status.platform}.` :
           status.ready ? `Local Manim ${status.versions.manim} is ready.` : 'Set up local rendering to render or validate plans.');
-        voiceLine.textContent = status.voiceReady ? 'Offline English narration is ready.' : status.voiceDownloadMiB ? '' :
+        narration.options[0].text = status.referenceVoiceEnabled ? 'Automatic local reference voice (English)' : 'Automatic offline voice (English)';
+        voiceLine.textContent = status.referenceVoiceEnabled ? 'Local reference narration is enabled.' : status.voiceReady ? 'Offline English narration is ready.' : status.voiceDownloadMiB ? '' :
           'Automatic narration is unavailable on this platform. Select Silent or WAV.';
         updateControls();
         newer.hidden = offset === 0;

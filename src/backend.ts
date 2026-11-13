@@ -5,6 +5,7 @@ import type { PluginBackendModule, PluginModelSpec } from 'learnharness-plugin-a
 import { integer, Jobs, object, text } from './jobs';
 import { PLAN_BYTES } from './protocol';
 import type { DraftModel, Status } from './protocol';
+import { referenceSupported } from './reference-voice';
 import { privateDirectory, Runtime } from './runtime';
 
 interface Installation {
@@ -18,12 +19,16 @@ export const activate: PluginBackendModule['activate'] = (ctx) => {
   const scratch = join(ctx.dataDirectory, 'manim-jobs');
   const jobs = new Jobs(scratch, runtime, ctx.signal);
   let installation: Installation | undefined;
+  let checkingVoice: AbortController | undefined;
+  let voiceProgress: string | undefined;
+  let voiceWork: Promise<unknown> | undefined;
   const drafts = new Map<string, AbortController>();
   const nativeAgents = ['teacher', 'practice'] as const;
 
   ctx.cleanup(async () => {
     installation?.abort.abort(new Error('Installation cancelled.'));
-    await Promise.allSettled([jobs.dispose(), installation?.work]);
+    checkingVoice?.abort(new Error('Reference voice check cancelled.'));
+    await Promise.allSettled([jobs.dispose(), installation?.work, voiceWork]);
   });
 
   ctx.cleanup(ctx.handle('status', async (raw): Promise<Status> => {
@@ -32,6 +37,32 @@ export const activate: PluginBackendModule['activate'] = (ctx) => {
     const saved = all.filter(job => job.saved);
     return { ...await runtime.status(), install: installation?.progress ?? null, savedCount: saved.length,
       jobs: [...all.filter(job => !job.saved), ...saved.slice(offset, offset + 12)] };
+  }));
+  ctx.cleanup(ctx.handle('referenceProfile', async () => {
+    const profile = await runtime.referenceProfile();
+    return { profile: profile ? { enabled: profile.enabled, transcript: profile.transcript } : null,
+      supported: referenceSupported, ready: await runtime.referenceReady(), progress: voiceProgress ?? null };
+  }));
+  ctx.cleanup(ctx.handle('saveReferenceProfile', (raw) => {
+    if (checkingVoice) throw new Error('A reference voice check is already running.');
+    if (installation) throw new Error('Wait for local setup to finish.');
+    ctx.signal.throwIfAborted();
+    const abort = new AbortController();
+    checkingVoice = abort;
+    const signal = AbortSignal.any([ctx.signal, abort.signal, AbortSignal.timeout(20 * 60 * 1000)]);
+    voiceProgress = 'Preparing the reference voice…';
+    voiceWork = runtime.saveReferenceProfile(raw, signal, message => { voiceProgress = message; })
+      .finally(() => { checkingVoice = undefined; voiceProgress = undefined; });
+    return voiceWork;
+  }));
+  ctx.cleanup(ctx.handle('cancelReferenceCheck', () => {
+    checkingVoice?.abort(new Error('Reference voice check cancelled.'));
+    return true;
+  }));
+  ctx.cleanup(ctx.handle('removeReferenceProfile', () => {
+    if (checkingVoice) throw new Error('Cancel the reference voice check first.');
+    ctx.signal.throwIfAborted();
+    return runtime.removeReferenceProfile();
   }));
   ctx.cleanup(ctx.handle('install', (raw) => {
     const { confirmed, narration, allowRuntime, allowVoice, setupKey } = object(raw);
@@ -42,7 +73,7 @@ export const activate: PluginBackendModule['activate'] = (ctx) => {
       throw new Error('Confirm the components shown for this narration option.');
     }
     const changed = 'The local setup changed. Check the updated download size and confirm it again.';
-    if (installation) throw new Error('An installation is already running.');
+    if (installation || checkingVoice) throw new Error('An installation is already running.');
     ctx.signal.throwIfAborted();
     const abort = new AbortController();
     const timer = AbortSignal.timeout(20 * 60 * 1000);
@@ -53,7 +84,7 @@ export const activate: PluginBackendModule['activate'] = (ctx) => {
     task.work = (async () => {
       if (setupKey !== await runtime.setupKey()) throw new Error(changed);
       if (!allowRuntime && !await runtime.ready()) throw new Error(changed);
-      if (narration === 'automatic' && !allowVoice && !await runtime.hasVerifiedVoice(signal)) throw new Error(changed);
+      if (narration === 'automatic' && !allowVoice && !(await runtime.referenceProfile())?.enabled && !await runtime.hasVerifiedVoice(signal)) throw new Error(changed);
       if (allowRuntime) await runtime.install(signal, progress);
       if (allowVoice) await runtime.installVoice(signal, progress);
     })().finally(() => { installation = undefined; });

@@ -7,6 +7,8 @@ import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep 
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { pathToFileURL } from 'node:url';
+import { readReferenceVoice, referenceRevision, referenceSample, referenceSupported, referenceTranscript, referenceURL } from './reference-voice';
+import type { ReferenceVoice } from './reference-voice';
 import { VIDEO_BYTES } from './protocol';
 import type { Narration } from './protocol';
 import { emptyNarration, placeUtterance, voiceBinary, voiceConfig, voiceDownloadMiB, voiceModels, voiceModelURL,
@@ -85,7 +87,7 @@ export function run(program: string, args: string[], cwd: string, env: NodeJS.Pr
         if (!windows) kill('SIGKILL');
         reject(signal.reason);
       } else if (code !== 0 || error) {
-        const detail = stage === 'Manim render' && code === 2 ? stderr.trim() : '';
+        const detail = (stage === 'Manim render' || stage === 'Reference narration') && code === 2 ? stderr.trim() : '';
         reject(error ?? new Error(detail || `${stage} failed (exit ${code ?? stoppedBy}).`));
       } else resolve(output);
     });
@@ -190,6 +192,8 @@ const ffmpegAt = (prefix: string) => join(prefix, ...(windows ? ['Library', 'bin
 const readyFile = 'ready.json';
 const voiceDirectory = `pocket-tts-${voiceRelease}-${voiceRevision.slice(0, 12)}-${voiceConfig.sha.slice(0, 12)}`;
 const voiceRequired = 'Install the offline voice for automatic narration, or choose Silent or a narration WAV.';
+const uvRelease = '0.13.8';
+const referenceRuntime = `qwen-${referenceRevision.slice(0, 12)}-mlx-0.32.4-py314-v1`;
 const voiceCPU = process.arch === 'x64' ? ' (requires an AVX2 CPU)' : '';
 
 async function checkVoiceFiles(folder: string, signal?: AbortSignal) {
@@ -263,7 +267,8 @@ export class Runtime {
   }
 
   async status() {
-    return { supported: Boolean(binary), platform: binary?.[0] ?? host,
+    const referenceVoice = referenceSupported ? await this.referenceProfile().catch(() => null) : null;
+    return { referenceVoiceEnabled: referenceVoice?.enabled === true, supported: Boolean(binary), platform: binary?.[0] ?? host,
       downloadMiB: binary?.[3] ?? null, ready: Boolean(await this.ready()), versions,
       voiceReady: !this.voiceInvalid && Boolean(await this.voiceReady()), voiceDownloadMiB, setupKey: await this.setupKey() };
   }
@@ -425,8 +430,133 @@ export class Runtime {
     return result;
   }
 
+  private get referencePath() { return join(this.data, 'reference-voice.json'); }
+  private get referenceRoot() { return join(this.data, 'voice', referenceRuntime); }
+  private referenceLock(name: string) { return join(this.assets, 'assets', 'runtime', 'voice', name); }
+
+  referenceProfile() { return readReferenceVoice(this.referencePath); }
+
+  async referenceReady() {
+    if (!referenceSupported) return false;
+    try {
+      return (await lstat(this.referenceRoot)).isDirectory() &&
+        (await lstat(join(this.referenceRoot, 'site', 'mlx'))).isDirectory() &&
+        (await lstat(join(this.referenceRoot, 'model', 'config.json'))).isFile();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      throw error;
+    }
+  }
+
+  async installReference(signal: AbortSignal, progress: (text: string) => void) {
+    if (!referenceSupported) {
+      throw new Error('Reference narration requires Apple Silicon and macOS 14 or later.');
+    }
+    if (await this.referenceReady()) return;
+    if (!await this.ready()) await this.install(signal, progress);
+    const manim = await this.ready();
+    if (!manim) throw new Error('Set up local rendering before enabling the reference voice.');
+    const voices = await privateDirectory(join(this.data, 'voice'));
+    const staging = await mkdtemp(join(voices, 'reference-install-'));
+    try {
+      const env = environment(staging);
+      const uvArchive = 'uv-aarch64-apple-darwin.tar.gz';
+      progress('Downloading the verified reference voice installer.');
+      await download(`https://github.com/astral-sh/uv/releases/download/${uvRelease}/${uvArchive}`,
+        join(staging, uvArchive), '6b71028a6b904f2ae3340ef52e595512de807d06c0a20eaef2f692581b246558', 14_375_545, signal, true);
+      await run('/usr/bin/tar', ['-xzf', uvArchive, 'uv-aarch64-apple-darwin/uv'],
+        staging, env, signal, 'Reference voice installer extraction');
+      const uv = join(staging, 'uv-aarch64-apple-darwin', 'uv');
+      const install = await privateDirectory(join(staging, 'install'));
+      const site = join(install, 'site');
+      progress('Installing verified MLX packages into Manim plugin data.');
+      await run(uv, ['--no-config', '--no-cache', '--no-progress', 'pip', 'sync', '--python', manim.python,
+        '--target', site, '--only-binary', ':all:', '--require-hashes', this.referenceLock('qwen-osx-arm64.txt')],
+        staging, env, signal, 'Reference voice packages');
+      await run(manim.python, ['-I', '-B', '-c',
+        "import sys; sys.path.insert(0, sys.argv[1]); import mlx.core as mx; assert mx.metal.is_available() and mx.default_device() == mx.gpu", site],
+        staging, env, signal, 'Reference voice Metal verification');
+      const model = await privateDirectory(join(install, 'model'));
+      await privateDirectory(join(model, 'speech_tokenizer'));
+      const lock = await readFile(this.referenceLock('qwen-model.tsv'), 'utf8');
+      const files = lock.trim().split('\n');
+      for (const [index, line] of files.entries()) {
+        const [file, size, sha] = line.split('\t');
+        progress(`Downloading and verifying reference voice file ${index + 1} of ${files.length}.`);
+        await download(`${referenceURL}/${file}?download=true`, join(model, file), sha, Number(size), signal, true);
+      }
+      signal.throwIfAborted();
+      await rename(install, this.referenceRoot);
+    } finally {
+      await rm(staging, { recursive: true, force: true });
+    }
+  }
+
+  async saveReferenceProfile(raw: unknown, signal: AbortSignal, progress: (text: string) => void) {
+    if (!raw || typeof raw !== 'object') throw new Error('Choose a local reference voice sample.');
+    const { transcript, enabled, sample } = raw as Partial<ReferenceVoice>;
+    if (typeof enabled !== 'boolean') throw new Error('Choose whether to enable reference narration.');
+    const previous = sample === undefined ? await this.referenceProfile() : null;
+    const profile = { transcript: referenceTranscript(transcript), enabled, sample: sample ?? previous?.sample ?? '' };
+    referenceSample(profile.sample);
+    if (profile.enabled) await this.installReference(signal, progress);
+    const root = await privateDirectory(this.data);
+    const scratch = await mkdtemp(join(root, 'voice-check-'));
+    try {
+      if (profile.enabled) {
+        progress('Checking the sample and running local reference synthesis.');
+        await this.synthesizeReference(profile, scratch, ['This is the local narration voice.'], signal);
+      }
+      signal.throwIfAborted();
+      const candidate = join(scratch, 'profile.json');
+      await writeFile(candidate, JSON.stringify(profile), { flag: 'wx', mode: 0o600, signal });
+      signal.throwIfAborted();
+      await rename(candidate, this.referencePath);
+      return { enabled, transcript: profile.transcript };
+    } catch (error) {
+      signal.throwIfAborted();
+      throw error;
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
+  }
+
+  async removeReferenceProfile() { await rm(this.referencePath, { force: true }); }
+
+  private async synthesizeReference(profile: ReferenceVoice, scratch: string, utterances: string[], signal: AbortSignal) {
+    const manim = await this.ready();
+    if (!manim || !await this.referenceReady()) throw new Error('The local reference voice runtime is unavailable. Set it up in Manim settings.');
+    const request = join(scratch, 'reference-request.json');
+    const wav = join(scratch, 'reference-input.wav');
+    try {
+      await writeFile(wav, referenceSample(profile.sample), { flag: 'wx', mode: 0o600, signal });
+      await writeFile(request, JSON.stringify({ wav, transcript: profile.transcript, utterances,
+        model: join(this.referenceRoot, 'model'), sitePackages: join(this.referenceRoot, 'site'),
+        modelLock: this.referenceLock('qwen-model.tsv') }), { flag: 'wx', mode: 0o600, signal });
+      await run(manim.python, ['-I', '-B', join(this.assets, 'assets', 'renderer', 'reference_voice.py'), request], scratch,
+        { ...environment(scratch, manim.prefix), HF_HUB_OFFLINE: '1', TRANSFORMERS_OFFLINE: '1', HF_HUB_DISABLE_TELEMETRY: '1' },
+        signal, 'Reference narration');
+    } finally {
+      await Promise.allSettled([rm(request, { force: true }), rm(wav, { force: true })]);
+    }
+  }
+
   async prepareNarration(scratch: string, signal: AbortSignal) {
     const { duration, beats } = await this.validate(scratch, signal, true);
+    const profile = referenceSupported ? await this.referenceProfile() : null;
+    if (profile?.enabled) {
+      const wav = emptyNarration(duration);
+      try {
+        await this.synthesizeReference(profile, scratch, beats.map(([words]) => words), signal);
+        for (const [index, [, cue, end]] of beats.entries()) {
+          await placeUtterance(wav, join(scratch, `reference-beat-${index + 1}.wav`), index + 1, cue, end);
+        }
+        await writeFile(join(scratch, 'narration.wav'), wav, { flag: 'wx', mode: 0o600, signal });
+      } finally {
+        await Promise.allSettled(beats.map((_, i) => rm(join(scratch, `reference-beat-${i + 1}.wav`), { force: true })));
+      }
+      return;
+    }
     const folder = await this.voiceReady(signal);
     if (!folder || !voiceBinary) {
       this.voiceInvalid = true;

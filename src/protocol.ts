@@ -22,6 +22,7 @@ export interface Status {
   versions: { python: string; manim: string; typst: string };
   install: string | null;
   voiceReady: boolean;
+  referenceVoiceEnabled: boolean;
   voiceDownloadMiB: number | null;
   setupKey: string;
   jobs: JobView[];

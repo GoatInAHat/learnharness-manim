@@ -9,7 +9,7 @@ import { bundleTestModule } from './bundle-test-module.mjs';
 import { pack, packageFiles, pluginId, zipTool } from './package.mjs';
 
 const require = createRequire(import.meta.url);
-const [{ Jobs }, { environment, run }, { CHUNK_BYTES, WAV_BYTES }, { emptyNarration, placeUtterance }, { SavedLessons }] = await Promise.all(
+const [{ Jobs }, { environment, run, Runtime }, { CHUNK_BYTES, WAV_BYTES }, { emptyNarration, placeUtterance }, { SavedLessons }] = await Promise.all(
   ['src/jobs.ts', 'src/runtime.ts', 'src/protocol.ts', 'src/voice.ts', 'src/saved-lessons.ts'].map(bundleTestModule),
 );
 
@@ -63,6 +63,28 @@ test('standalone package extracts to the LearnHarness plugin layout and activate
   await assert.rejects(operations.get('install')({ confirmed: true, narration: 'automatic', allowRuntime: false,
     allowVoice: true, setupKey: status.setupKey }), /setup changed/);
   assert.deepEqual(await readdir(plugin), ['dist']);
+});
+
+test('reference profile validates inputs, survives restart, and is removable', async (t) => {
+  const folder = await scratch(t);
+  const runtime = new Runtime(folder, folder);
+  const wav = emptyNarration(120);
+  const profile = { sample: wav.toString('base64'), transcript: 'This is an authorized fixture.', enabled: false };
+  const signal = new AbortController().signal;
+  const saved = { enabled: false, transcript: profile.transcript };
+  assert.equal(await runtime.referenceProfile(), null);
+  await assert.rejects(runtime.saveReferenceProfile({ ...profile, sample: 'bad' }, signal), /Choose a mono/);
+  await assert.rejects(runtime.saveReferenceProfile({ ...profile, transcript: '' }, signal), /exact transcript/);
+  if (process.platform !== 'win32') {
+    assert.deepEqual(await runtime.saveReferenceProfile(profile, signal), saved);
+    await assert.rejects(runtime.saveReferenceProfile({ ...profile, transcript: 'Changed' },
+      AbortSignal.abort(new Error('cancelled'))), /cancelled/);
+    const reopened = new Runtime(folder, folder);
+    assert.deepEqual(await reopened.referenceProfile(), profile);
+    assert.deepEqual(await reopened.saveReferenceProfile({ ...saved, sample: undefined }, signal), saved);
+    await reopened.removeReferenceProfile();
+    assert.equal(await reopened.referenceProfile(), null);
+  }
 });
 
 test('completed lessons reopen after a new backend and disposing temporary jobs never deletes them', async (t) => {
