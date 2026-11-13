@@ -8,7 +8,7 @@ export const activate: PluginFrontendModule['activate'] = (ctx) => {
   ctx.cleanup(ctx.registerAction({ id: 'open-explainer', name: 'Manim Explainer', run: () => ctx.app.openView('explainer') }));
   ctx.cleanup(ctx.placeAction({ id: 'explainer-sidebar', actionId: 'open-explainer', location: 'sidebar' }));
 
-  type VoiceSettings = { profile: Pick<ReferenceVoice, 'enabled' | 'transcript'> | null; supported: boolean; ready: boolean; progress: string | null };
+  type VoiceSettings = { profile: Pick<ReferenceVoice, 'enabled' | 'transcript'> | null; supported: boolean; renderReady: boolean; ready: boolean; progress: string | null };
   ctx.cleanup(ctx.registerSettings(mountReferenceSettings));
 
   function mountReferenceSettings(container: HTMLElement, signal: AbortSignal) {
@@ -17,10 +17,19 @@ export const activate: PluginFrontendModule['activate'] = (ctx) => {
     status.textContent = 'Checking reference voice settings…';
     container.append(status);
     void (async () => {
-      const { profile, ready, supported } = await ctx.call<VoiceSettings>('referenceProfile');
+      const { profile, ready, supported, renderReady } = await ctx.call<VoiceSettings>('referenceProfile');
       if (signal.aborted) return;
       if (!supported) {
         status.textContent = 'Reference narration is available on Apple Silicon with macOS 14 or later.';
+        return;
+      }
+      if (!renderReady) {
+        status.textContent = 'Set up local rendering in Manim Explainer first. You can choose Silent video for that setup to download only the renderer.';
+        const open = document.createElement('button');
+        open.type = 'button';
+        open.textContent = 'Open Manim Explainer';
+        open.addEventListener('click', () => { void ctx.app.openView('explainer'); });
+        container.append(open);
         return;
       }
       status.textContent = profile?.enabled && !ready ? 'The reference runtime needs repair. Reinstall it to resume automatic reference narration.' :

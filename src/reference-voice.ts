@@ -20,14 +20,33 @@ export function referenceTranscript(raw: unknown) {
 }
 
 export function referenceSample(raw: unknown) {
-  if (typeof raw !== 'string' || !raw || raw.length > Math.ceil(referenceWavBytes / 3) * 4) {
-    throw new Error('Choose a mono 24 kHz PCM16 WAV with 3–30 seconds of speech.');
-  }
+  const invalid = () => new Error('Choose a mono 24 kHz PCM16 WAV with 3–30 seconds of speech.');
+  if (typeof raw !== 'string' || !raw || raw.length > Math.ceil(referenceWavBytes / 3) * 4) throw invalid();
   const audio = Buffer.from(raw, 'base64');
-  if (audio.length > referenceWavBytes || audio.toString('base64') !== raw ||
-      audio.subarray(0, 4).toString() !== 'RIFF' || audio.subarray(8, 12).toString() !== 'WAVE') {
-    throw new Error('Choose a mono 24 kHz PCM16 WAV with 3–30 seconds of speech.');
+  if (audio.length < 44 || audio.length > referenceWavBytes || audio.toString('base64') !== raw ||
+      audio.subarray(0, 4).toString() !== 'RIFF' || audio.subarray(8, 12).toString() !== 'WAVE' ||
+      audio.readUInt32LE(4) !== audio.length - 8) throw invalid();
+  let format = false;
+  let data = false;
+  for (let offset = 12; offset < audio.length;) {
+    if (offset + 8 > audio.length) throw invalid();
+    const chunk = audio.toString('ascii', offset, offset + 4);
+    const size = audio.readUInt32LE(offset + 4);
+    const start = offset + 8;
+    offset = start + size + (size % 2);
+    if (offset > audio.length) throw invalid();
+    if (chunk === 'fmt ') {
+      if (format || size < 16 || audio.readUInt16LE(start) !== 1 ||
+          audio.readUInt16LE(start + 2) !== 1 || audio.readUInt32LE(start + 4) !== 24000 ||
+          audio.readUInt32LE(start + 8) !== 48000 || audio.readUInt16LE(start + 12) !== 2 ||
+          audio.readUInt16LE(start + 14) !== 16) throw invalid();
+      format = true;
+    } else if (chunk === 'data') {
+      if (!format || data || size % 2 || size < 3 * 48000 || size > 30 * 48000) throw invalid();
+      data = true;
+    }
   }
+  if (!data) throw invalid();
   return audio;
 }
 

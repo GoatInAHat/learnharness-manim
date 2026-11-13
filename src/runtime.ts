@@ -484,10 +484,9 @@ export class Runtime {
     if (!referenceSupported) {
       throw new Error('Reference narration requires Apple Silicon and macOS 14 or later.');
     }
-    if (!force && await this.referenceReady()) return;
-    if (!await this.ready()) await this.install(signal, progress);
     const manim = await this.ready();
-    if (!manim) throw new Error('Set up local rendering before enabling the reference voice.');
+    if (!manim) throw new Error('Set up local rendering in Manim Explainer before enabling the reference voice.');
+    if (!force && await this.referenceReady()) return;
     const voices = await privateDirectory(join(this.data, 'voice'));
     const staging = await mkdtemp(join(voices, 'reference-install-'));
     try {

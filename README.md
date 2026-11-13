@@ -17,7 +17,9 @@ Automatic narration uses a fixed offline English voice by default and needs no a
 
 ## Optional local reference voice
 
-On Apple Silicon with macOS 14 or later, open **Manim Explainer → Settings** and
+On Apple Silicon with macOS 14 or later, first run **Set up local rendering** in
+Manim Explainer. Choose **Silent video** for that setup if you only want to
+download the renderer. Then open **Manim Explainer → Settings** and
 choose a WAV you have permission to synthesize. Use 3–30 seconds of mono 24 kHz
 PCM16 speech and enter its exact transcript. Select **Download and enable reference
 voice**. The one-time setup downloads about 2.2 GB into this plugin's private data,

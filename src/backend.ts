@@ -41,7 +41,7 @@ export const activate: PluginBackendModule['activate'] = (ctx) => {
   ctx.cleanup(ctx.handle('referenceProfile', async () => {
     const profile = await runtime.referenceProfile();
     return { profile: profile ? { enabled: profile.enabled, transcript: profile.transcript } : null,
-      supported: referenceSupported, ready: await runtime.referenceReady(), progress: voiceProgress ?? null };
+      supported: referenceSupported, renderReady: referenceSupported && Boolean(await runtime.ready()), ready: await runtime.referenceReady(), progress: voiceProgress ?? null };
   }));
   function checkVoice<T>(work: (signal: AbortSignal, progress: (message: string) => void) => Promise<T>) {
     if (checkingVoice) throw new Error('A reference voice check is already running.');

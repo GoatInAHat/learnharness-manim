@@ -89,6 +89,39 @@ test('reference profile validates inputs, survives restart, and is removable', a
   }
 });
 
+test('invalid reference WAVs fail before setup or staging', async (t) => {
+  const folder = await scratch(t);
+  const runtime = new Runtime(folder, folder);
+  const stereo = emptyNarration(120);
+  stereo.writeUInt16LE(2, 22);
+  const truncated = emptyNarration(120).subarray(0, -1);
+  const wrongRate = emptyNarration(120);
+  wrongRate.writeUInt32LE(44100, 24);
+  const badChunk = emptyNarration(120);
+  badChunk.writeUInt32LE(0xffffffff, 40);
+  const signal = new AbortController().signal;
+  let setups = 0;
+  runtime.installReference = async () => { setups++; };
+  for (const wav of [stereo, truncated, wrongRate, badChunk, emptyNarration(89), emptyNarration(901)]) {
+    await assert.rejects(runtime.saveReferenceProfile({
+      sample: wav.toString('base64'), transcript: 'This is an authorized fixture.', enabled: true,
+    }, signal), /Choose a mono/);
+  }
+  assert.equal(setups, 0);
+  assert.deepEqual(await readdir(folder), []);
+});
+
+test('reference setup requires an existing Manim runtime', {
+  skip: process.platform !== 'darwin' || process.arch !== 'arm64',
+}, async (t) => {
+  const folder = await scratch(t);
+  const runtime = new Runtime(folder, folder);
+  runtime.ready = async () => null;
+  runtime.install = async () => assert.fail('reference setup must not download the base runtime');
+  await assert.rejects(runtime.installReference(new AbortController().signal, () => {}), /Set up local rendering/);
+  assert.deepEqual(await readdir(folder), []);
+});
+
 test('reference readiness detects missing companions and same-size model corruption', {
   skip: process.platform !== 'darwin' || process.arch !== 'arm64',
 }, async (t) => {
