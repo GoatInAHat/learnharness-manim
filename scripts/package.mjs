@@ -10,9 +10,10 @@ export const staticFiles = [
   ['runtime/voice/POCKET-TTS-LICENSE', 'POCKET-TTS-LICENSE'],
   ...[
     'renderer/scene.py', 'renderer/plan.py', 'renderer/semantic.py', 'renderer/reference_voice.py',
+    'renderer/tex_setup.py', 'runtime/tex/lock.json',
     'contract/semantic-math-v3.md', 'contract/semantic-math-v3.schema.json',
     'runtime/osx-arm64.tsv', 'runtime/linux-64.tsv', 'runtime/win-64.tsv', 'runtime/voice/english.yaml',
-    'runtime/voice/sesame-model.tsv', 'runtime/voice/mlx-osx-arm64.txt', 'skills/manim-narration/SKILL.md',
+    'runtime/voice/qwen-model.tsv', 'runtime/voice/qwen-osx-arm64.txt',
   ].map((path) => [path, `assets/${path}`]),
 ];
 export const packageFiles = ['main.js', 'backend.cjs', 'cli.cjs', ...staticFiles.map(([, target]) => target)];

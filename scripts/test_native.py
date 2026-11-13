@@ -14,7 +14,7 @@ from manim import tempconfig
 sys.path[:0] = [sys.argv[1], str(Path(__file__).resolve().parent)]
 from fixture import fixture
 from plan import PlanError, load, value_and_derivative
-from scene import PINK, PLOT_MAX, PLOT_MIN, LessonScene, Timeline, narration_at
+from scene import PINK, PLOT_MAX, PLOT_MIN, LessonScene, Timeline, narration_at, render
 from semantic import FPS, MAX_PLAN, compile_frame, graph_ast, validate
 
 ROOT = Path(sys.argv[2])
@@ -108,29 +108,29 @@ class NativeTests(unittest.TestCase):
             draw(1110)
             self.assertIn(scene.formulas['secant'], scene.hud)
             self.assertIn(scene.captions[raw['beats'][2]['caption']], scene.hud)
-            near_secant = draw(1140)
+            draw(1140)
             self.assertIn(scene.formulas['limit'], scene.hud)
             self.assertNotIn(scene.formulas['secant'], scene.hud)
             self.assertEqual(scene.readouts['slope'][0], 'Secant ≈ 1.010 m/s')
             self.assertGreater(len(scene.tick_labels), 6)
+            self.assertTrue(scene.changes.has_points())
             self.assertTrue(any(0 < part.get_stroke_width() < 4
                                 for part in scene.formulas['limit'].family_members_with_points()))
-            for path in (scene.curve, scene.slope_line, scene.run, scene.rise):
+            for path in (scene.curve, scene.slope_line, scene.changes):
                 self.assertTrue(path.has_points())
                 self.assertTrue(np.all(path.points[:, :2] >= PLOT_MIN - 1e-10))
                 self.assertTrue(np.all(path.points[:, :2] <= PLOT_MAX + 1e-10))
             np.testing.assert_allclose([(dot.width, dot.height) for dot in (scene.base, scene.moving)], marker_sizes)
-            draw(1679)
+            last_secant = draw(1679)
             self.assertIn(scene.moving, scene.geometry)
             self.assertIn('Q distinct', scene.readouts['interval'][0])
             tangent = draw(1680)
             self.assertNotIn(scene.moving, scene.geometry)
-            self.assertFalse(scene.run.has_points())
-            self.assertFalse(scene.rise.has_points())
-            self.assertEqual(scene.readouts['interval'][0], 'Limit: h → 0 · Q → P')
+            self.assertFalse(scene.changes.has_points())
+            self.assertEqual(scene.readouts['interval'][0], 'h = 0 · Q = P')
             self.assertEqual(scene.readouts['slope'][0], 'Tangent ≈ 1.000 m/s')
             pink = tuple(bytes.fromhex(PINK[1:]))
-            self.assertGreater(np.sum(np.all(near_secant[225:930] == pink, axis=2)), 10)
+            self.assertGreater(np.sum(np.all(last_secant[225:930] == pink, axis=2)), 10)
             self.assertEqual(np.sum(np.all(tangent[225:930] == pink, axis=2)), 0)
 
     def test_normalized_logistic_and_piecewise_join(self):
@@ -256,6 +256,29 @@ class NativeTests(unittest.TestCase):
             output.truncate(12 * 1024 * 1024 + 1)
         with self.assertRaisesRegex(PlanError, 'exceeds 12 MiB'):
             narration_at(folder, plan)
+
+    def test_direct_source_runs_a_dynamic_scene_through_manim(self):
+        folder = ROOT / 'direct'
+        folder.mkdir()
+        source = '''from pathlib import Path
+from manim import Circle, Create, Scene
+
+Path("executed").write_text("render only")
+
+def construct(self):
+    self.play(Create(Circle()), run_time=0.5)
+
+DynamicScene = type("DynamicScene", (Scene,), {"__module__": __name__, "construct": construct})
+'''
+        plan = dict(version=3, title='Direct Python', source=source, sceneName='DynamicScene')
+        with self.assertRaisesRegex(PlanError, 'Python scene syntax error'):
+            validate(dict(plan, source='class invalid'))
+        self.assertTrue(validate(plan)['source'])
+        self.assertFalse((folder / 'executed').exists())
+        (folder / 'plan.json').write_text(json.dumps(plan), encoding='utf-8')
+        render(folder, 720, False)
+        self.assertEqual((folder / 'executed').read_text(), 'render only')
+        self.assertGreater((folder / 'video.mp4').stat().st_size, 0)
 
 
 if __name__ == '__main__':

@@ -1,6 +1,20 @@
 # Semantic math scene v3
 
-The companion JSON Schema describes input shape. Renderers also enforce the rules below. Plans are UTF-8 JSON (64 KiB maximum) with plain labels and narration utterances. A scene has one graph and five to eight beats over 90–120 integer seconds at exactly 30 fps.
+Plans are UTF-8 JSON. Direct Manim source plans support up to 1 MiB and existing graph plans support up to 64 KiB. For general video authoring, use the direct Manim form below. Existing graph lessons use the companion JSON Schema and graph rules.
+
+## Direct Manim scene
+
+Use `{"version":3,"title":"Lesson title","source":"...","sceneName":"Lesson"}`. Put complete Python in `source` and name the Manim `Scene` subclass to render in `sceneName`. The plugin runs that source as ordinary local Python through the installed Manim Community CLI. Use Manim classes, animations, updaters, camera motion, custom math, and available dependencies directly. The default renderer is Cairo. Set `"renderer":"opengl"` for scenes requiring OpenGL. `MathTex` uses local LaTeX with pinned private setup on supported platforms. `MathTypst` uses the bundled Typst runtime.
+
+For the configured local narration voice, add `"narration":{"intro":"The words to speak."}`. The working directory contains `voice.json`, mapping each clip name to a `path` and a measured `duration` in seconds. In your scene, use `json.loads(Path("voice.json").read_text())` to load the clips. Call `self.add_sound(clip["path"])` at the appropriate scene time and use `clip["duration"]` to schedule animations or holds. The scene controls its timeline and can combine narration with its own audio. With no narration requested, `voice.json` contains an empty object. A WAV supplied through the import or CLI is available to a direct scene as `narration.wav`; place it in Python using `self.add_sound`.
+
+Use `timeoutSeconds` to set the job's processing timeout when a more complex scene needs longer than the default 720 seconds.
+
+Use trusted source intended to run locally. Validation checks the payload and Python syntax, then rendering executes the source with the current user's access. The tool runs in a private job directory.
+
+## Graph plans
+
+A graph plan has one graph and five to eight beats over 90–120 integer seconds at exactly 30 fps.
 
 ## Graph and line
 
@@ -24,6 +38,4 @@ A compiled frame supplies the frame index, active beat, cue and effective narrat
 
 ## Comparison audio
 
-A separately authored master WAV is mono, signed 16-bit integer PCM at 16–48 kHz. Time zero is video frame zero. Pad with silence around utterances at their specified cues and through the final frame. No executable content belongs in the plan. The WAV stays separate from the JSON and may be supplied to either local renderer. Renderers can also synthesize each utterance at its cue from the same plan.
-
-For automatic Sesame reference narration, Manim may adjust the beat boundaries in its render copy to fit the measured utterances. Motion lengths and cue offsets within each beat are preserved, and the adjusted plan follows the same timing rules. An utterance that reaches the synthesis limit or cannot fit in the 120-second scene limit requires shorter narration.
+A separately authored master WAV for a graph plan is mono, signed 16-bit integer PCM at 16–48 kHz. Time zero is video frame zero. Pad with silence around utterances at their specified cues and through the final frame. Graph plans are declarative. The WAV stays separate from the JSON and may be supplied to either graph renderer. Renderers can also synthesize each utterance at its cue from the same plan.

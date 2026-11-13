@@ -2,12 +2,8 @@ import { release as kernelRelease } from 'node:os';
 import { lstat, readFile } from 'node:fs/promises';
 
 export const referenceSupported = process.platform === 'darwin' && process.arch === 'arm64' && Number.parseInt(kernelRelease(), 10) >= 23;
-export const referenceRevision = 'fcf0cc857eade3615a60f30722cf5197d4f88406';
-export const referenceSources = {
-  csm: `mlx-community/csm-1b-8bit/resolve/${referenceRevision}`,
-  mimi: 'kyutai/moshiko-pytorch-bf16/resolve/2bfc9ae6e89079a5cc7ed2a68436010d91a3d289',
-  tokenizer: 'unsloth/Llama-3.2-1B/resolve/9535bd9b1d1dea6acafbdc4813b728796aeb28da',
-};
+export const referenceRevision = '50f45ef0047cde7e84c2ef04326acb8ada2436a7';
+export const referenceURL = `https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit/resolve/${referenceRevision}`;
 export const referenceWavBytes = 30 * 24000 * 2 + 4096;
 
 export interface ReferenceVoice {

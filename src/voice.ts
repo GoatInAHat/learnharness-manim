@@ -35,7 +35,7 @@ export const voiceBinary = voiceBinaries[host as keyof typeof voiceBinaries];
 export const voiceDownloadMiB = voiceBinary
   ? Math.ceil((voiceBinary.bytes + voiceModels.reduce((total, asset) => total + asset.bytes, 0)) / 2 ** 20) : null;
 
-// Both local voices write mono PCM16 at 24 kHz (800 samples per video frame).
+// Pocket TTS writes this canonical mono PCM16 format at 24 kHz (800 samples per video frame).
 const header = Buffer.from('524946460000000057415645666d74201000000001000100c05d000080bb0000020010006461746100000000', 'hex');
 const frameBytes = 1600;
 
@@ -48,9 +48,8 @@ export function emptyNarration(durationFrames: number) {
   return wav;
 }
 
-export async function readUtterance(path: string, index: number, maxFrames: number) {
+export async function readUtterance(path: string, index: number, limit: number) {
   const stat = await lstat(path);
-  const limit = maxFrames * frameBytes;
   if (stat.size > header.length + limit) {
     throw new Error(`Automatic narration for beat ${index} exceeds its cue window. Shorten the narration, adjust the timing, or select a different audio option.`);
   }
@@ -61,44 +60,12 @@ export async function readUtterance(path: string, index: number, maxFrames: numb
       speech.readUInt32LE(4) !== speech.length - 8 || !speech.subarray(8, 40).equals(header.subarray(8, 40)) ||
       speech.readUInt32LE(40) !== speech.length - header.length) throw invalid();
   for (let offset = header.length; offset < speech.length; offset += 2) {
-    if (Math.abs(speech.readInt16LE(offset)) >= 16) return speech.subarray(header.length);
+    if (Math.abs(speech.readInt16LE(offset)) >= 16) return speech;
   }
   throw new Error(`Automatic narration for beat ${index} is silent.`);
 }
 
 export async function placeUtterance(wav: Buffer, path: string, index: number, cue: number, end: number) {
-  const pcm = await readUtterance(path, index, end - cue);
-  pcm.copy(wav, header.length + cue * frameBytes);
-}
-
-type BeatTiming = { startFrame: number; settleFrame: number; cueFrame: number };
-
-// Keep the authored motion and cue offsets. Use spare hold time if a longer beat
-// would otherwise push the scene beyond the contract's 120-second limit.
-export function alignReferenceNarration<T extends BeatTiming>(plan: { durationSeconds: number; beats: T[] }, audio: Buffer[]) {
-  const fps = 30;
-  const duration = plan.durationSeconds * fps;
-  const minimum = plan.beats.map((beat, i) => Math.max(beat.settleFrame - beat.startFrame + 1,
-    beat.cueFrame - beat.startFrame + Math.ceil(audio[i].length / frameBytes) + 9));
-  const lengths = plan.beats.map((beat, i) => Math.max(minimum[i], (plan.beats[i + 1]?.startFrame ?? duration) - beat.startFrame));
-  let excess = lengths.reduce((sum, length) => sum + length, 0) - 120 * fps;
-  for (const [i, length] of lengths.entries()) {
-    if (excess <= 0) break;
-    const trim = Math.min(excess, length - minimum[i]);
-    lengths[i] -= trim;
-    excess -= trim;
-  }
-  if (excess > 0) throw new Error('The Sesame narration needs more than 120 seconds. Shorten the lesson narration.');
-
-  let start = 0;
-  const beats = plan.beats.map((beat, i) => {
-    const shift = start - beat.startFrame;
-    const timing = { ...beat, startFrame: start, settleFrame: beat.settleFrame + shift, cueFrame: beat.cueFrame + shift };
-    start += lengths[i];
-    return timing;
-  });
-  const durationSeconds = Math.ceil(start / fps);
-  const wav = emptyNarration(durationSeconds * fps);
-  for (const [i, beat] of beats.entries()) audio[i].copy(wav, header.length + beat.cueFrame * frameBytes);
-  return { plan: { ...plan, durationSeconds, beats }, wav };
+  const speech = await readUtterance(path, index, (end - cue) * frameBytes);
+  speech.copy(wav, header.length + cue * frameBytes, header.length);
 }

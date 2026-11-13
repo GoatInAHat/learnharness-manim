@@ -32,26 +32,5 @@ https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/tree/a7056f505a4a
 https://huggingface.co/kyutai/tts-voices#alba-mackenna
 https://creativecommons.org/licenses/by/4.0/
 
-Optional reference narration uses MLX Audio 0.6.5 (MIT), MLX 0.32.4 (MIT),
-and the pinned Apple Silicon dependencies in runtime/voice/mlx-osx-arm64.txt.
-https://pypi.org/project/mlx-audio/0.6.5/
-https://pypi.org/project/mlx/0.32.4/
-
-The optional setup downloads the following files under their upstream terms.
-Their revisions and file digests are pinned in src/reference-voice.ts and
-runtime/voice/sesame-model.tsv. The plugin archive contains neither the weights
-nor the tokenizer files.
-
-- Sesame CSM 1B, converted to 8-bit MLX by MLX Community (Apache 2.0).
-  https://huggingface.co/mlx-community/csm-1b-8bit/tree/fcf0cc857eade3615a60f30722cf5197d4f88406
-- Kyutai Mimi audio codec checkpoint (CC BY 4.0).
-  https://huggingface.co/kyutai/moshiko-pytorch-bf16/tree/2bfc9ae6e89079a5cc7ed2a68436010d91a3d289
-- Meta Llama 3.2 tokenizer files from Unsloth (Llama 3.2 Community License).
-  https://huggingface.co/unsloth/Llama-3.2-1B/tree/9535bd9b1d1dea6acafbdc4813b728796aeb28da
-  https://github.com/meta-llama/llama-models/blob/main/models/llama3_2/LICENSE
-
-Built with Llama. Llama 3.2 is licensed under the Llama 3.2 Community License,
-Copyright © Meta Platforms, Inc. All Rights Reserved.
-
 contract/ contains the shared semantic math scene v3 specification and JSON
 Schema. The renderer consumes that format directly.

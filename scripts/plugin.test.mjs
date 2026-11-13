@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, truncate, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { createHash, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -9,7 +9,8 @@ import { bundleTestModule } from './bundle-test-module.mjs';
 import { pack, packageFiles, pluginId, zipTool } from './package.mjs';
 
 const require = createRequire(import.meta.url);
-const [{ Jobs }, { environment, run, Runtime }, { CHUNK_BYTES, WAV_BYTES }, { alignReferenceNarration, emptyNarration, placeUtterance }, { SavedLessons }] = await Promise.all(
+const [{ Jobs }, { environment, run, Runtime }, { CHUNK_BYTES, INLINE_VIDEO_BYTES, PLAN_BYTES, WAV_BYTES },
+  { emptyNarration, placeUtterance }, { SavedLessons }] = await Promise.all(
   ['src/jobs.ts', 'src/runtime.ts', 'src/protocol.ts', 'src/voice.ts', 'src/saved-lessons.ts'].map(bundleTestModule),
 );
 
@@ -34,7 +35,7 @@ test('standalone package extracts to the LearnHarness plugin layout and activate
   const manifest = JSON.parse(await readFile(join(dist, 'manifest.json'), 'utf8'));
   assert.equal(manifest.id, pluginId);
   assert.equal(manifest.apiVersion, 1);
-  assert.equal(manifest.version, '0.3.0');
+  assert.equal(manifest.version, '0.4.0');
   assert.equal(manifest.minAppVersion, '0.6.0');
   for (const file of [manifest.main, manifest.backend, manifest.styles]) assert.ok(packageFiles.includes(file));
   const main = await readFile(join(dist, manifest.main));
@@ -42,16 +43,13 @@ test('standalone package extracts to the LearnHarness plugin layout and activate
 
   const operations = new Map();
   const cleanup = [];
-  const guidance = new Set();
+  const tools = [];
   const abort = new AbortController();
-  await require(join(dist, manifest.backend)).activate({
+  require(join(dist, manifest.backend)).activate({
     directory: dist, dataDirectory: join(plugin, 'data'), signal: abort.signal,
     handle: (name, handler) => { operations.set(name, handler); return () => operations.delete(name); },
-    cleanup: (fn) => cleanup.push(fn), registerTools: () => () => {},
-    registerInstructions: (contribution) => {
-      guidance.add(contribution);
-      return () => guidance.delete(contribution);
-    },
+    cleanup: (fn) => cleanup.push(fn), registerInstructions: () => () => {},
+    registerTools: ({ create }) => { tools.push(...create()); return () => {}; },
   });
   t.after(async () => {
     abort.abort();
@@ -61,12 +59,7 @@ test('standalone package extracts to the LearnHarness plugin layout and activate
   assert.equal(status.ready, false);
   assert.equal(status.install, null);
   assert.equal(status.voiceReady, false);
-  assert.equal(status.referenceVoiceReady, false);
-  const [instruction] = [...guidance];
-  assert.deepEqual(instruction.agents, ['teacher', 'practice']);
-  const skill = await readFile(join(dist, 'assets', 'skills', 'manim-narration', 'SKILL.md'), 'utf8');
-  assert.ok(skill.replaceAll('\r\n', '\n').endsWith(`${instruction.text}\n`));
-  assert.match(instruction.text, /without SSML, bracketed stage directions or speaker IDs/);
+  assert.deepEqual(tools.map(({ name }) => name), ['manim_render_scene', 'manim_render_lesson']);
   assert.throws(() => operations.get('repairReferenceVoice')({ confirmed: false }), /Confirm the reference voice download/);
   assert.throws(() => operations.get('install')({ confirmed: 'true', narration: 'automatic' }), /Confirm the local setup download/);
   assert.throws(() => operations.get('install')({ confirmed: true, narration: 'unexpected' }), /Select a narration option/);
@@ -76,9 +69,6 @@ test('standalone package extracts to the LearnHarness plugin layout and activate
   await assert.rejects(operations.get('install')({ confirmed: true, narration: 'automatic', allowRuntime: false,
     allowVoice: true, setupKey: status.setupKey }), /setup changed/);
   assert.deepEqual(await readdir(plugin), ['dist']);
-  abort.abort();
-  await Promise.all(cleanup.splice(0).map((fn) => fn()));
-  assert.equal(guidance.size, 0);
 });
 
 test('reference profile validates inputs, survives restart, and is removable', async (t) => {
@@ -150,12 +140,12 @@ test('reference readiness detects missing companions and same-size model corrupt
 }, async (t) => {
   const folder = await scratch(t);
   const lockDir = join(folder, 'assets', 'runtime', 'voice');
-  const root = join(folder, 'voice', 'sesame-fcf0cc857ead-mlx-0.32.4-py314-v1');
-  const model = join(root, 'model', 'csm', 'fixture.safetensors');
+  const root = join(folder, 'voice', 'qwen-50f45ef0047c-mlx-0.32.4-py314-v1');
+  const model = join(root, 'model', 'speech_tokenizer', 'fixture.safetensors');
   const files = ['mlx/core.cpython-314-darwin.so', 'mlx/lib/libmlx.dylib', 'mlx/lib/mlx.metallib',
-    'mlx_audio/tts/models/sesame/sesame.py', 'safetensors/_safetensors_rust.abi3.so', 'tokenizers/tokenizers.abi3.so'];
+    'mlx_audio/tts/models/qwen3_tts/qwen3_tts.py', 'safetensors/_safetensors_rust.abi3.so', 'tokenizers/tokenizers.abi3.so'];
   await mkdir(lockDir, { recursive: true });
-  for (const group of ['csm', 'mimi', 'tokenizer']) await mkdir(join(root, 'model', group), { recursive: true });
+  await mkdir(join(root, 'model', 'speech_tokenizer'), { recursive: true });
   await mkdir(join(root, 'site', 'transformers'), { recursive: true });
   for (const file of files) {
     const path = join(root, 'site', file);
@@ -163,7 +153,7 @@ test('reference readiness detects missing companions and same-size model corrupt
     await writeFile(path, 'companion');
   }
   const expected = createHash('sha256').update('good').digest('hex');
-  await writeFile(join(lockDir, 'sesame-model.tsv'), `csm/fixture.safetensors\t4\t${expected}\n`);
+  await writeFile(join(lockDir, 'qwen-model.tsv'), `speech_tokenizer/fixture.safetensors\t4\t${expected}\n`);
   const runtime = new Runtime(folder, folder);
   assert.equal(await runtime.referenceReady(), false);
   await writeFile(model, 'good');
@@ -299,6 +289,31 @@ test('jobs default to automatic narration and require an explicit silent or WAV 
   assert.deepEqual(rendered, ['automatic', 'silent', 'wav']);
 });
 
+test('source jobs accept larger inputs and keep videos beyond the inline preview limit', async (t) => {
+  const folder = await scratch(t);
+  const size = INLINE_VIDEO_BYTES + 1;
+  const jobs = new Jobs(folder, {
+    ready: async () => true,
+    validate: async () => ({ source: true }),
+    render: async (directory) => {
+      const path = join(directory, 'video.mp4');
+      await writeFile(path, 'fixture');
+      await truncate(path, size);
+      return size;
+    },
+  }, new AbortController().signal);
+  t.after(() => jobs.dispose());
+  await assert.rejects(jobs.create(JSON.stringify({ graph: 'x'.repeat(PLAN_BYTES) })), /64 KiB/);
+  const id = await jobs.create(JSON.stringify({ title: 'Large source', source: ' '.repeat(PLAN_BYTES) }));
+  jobs.start(id);
+  for (let i = 0; i < 100 && !(await jobs.views()).some((job) => job.saved); i++) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.ok((await jobs.views()).some((job) => job.id === id && job.saved && job.size === size));
+  assert.equal(await jobs.videoPath(id), join(folder, 'saved', id, 'video.mp4'));
+  await assert.rejects(jobs.videoPath('../video.mp4'), /unavailable/);
+});
+
 test('PCM placement starts at the exact cue and rejects truncation, silence and overrun', async (t) => {
   const path = join(await scratch(t), 'beat.wav');
   const speech = emptyNarration(1);
@@ -315,26 +330,6 @@ test('PCM placement starts at the exact cue and rejects truncation, silence and 
   assert.ok(wav.subarray(44, 1644).every((byte) => byte === 0));
   assert.deepEqual(wav.subarray(1644, 3244), speech.subarray(44));
   assert.ok(wav.subarray(3244).every((byte) => byte === 0));
-});
-
-test('Sesame moves beat boundaries around the actual PCM and preserves motion and the cue', () => {
-  const plan = { durationSeconds: 90, beats: [
-    { startFrame: 0, settleFrame: 0, cueFrame: 12 },
-    { startFrame: 40, settleFrame: 140, cueFrame: 55, narrationScope: 'process' },
-    { startFrame: 180, settleFrame: 195, cueFrame: 207 },
-  ] };
-  const first = Buffer.alloc(20 * 1600 + 2, 42);
-  const audio = [first, Buffer.alloc(1600, 5), Buffer.alloc(1600, 3)];
-  const { plan: aligned, wav } = alignReferenceNarration(plan, audio);
-  assert.equal(aligned.durationSeconds, 91);
-  assert.equal(plan.beats[1].startFrame, 40);
-  assert.deepEqual(aligned.beats[1], { startFrame: 42, settleFrame: 142, cueFrame: 57, narrationScope: 'process' });
-  assert.deepEqual(wav.subarray(44 + 12 * 1600, 44 + 12 * 1600 + first.length), first);
-  assert.ok(wav.subarray(44 + 12 * 1600 + first.length, 44 + 57 * 1600).every(byte => byte === 0));
-  const atCap = alignReferenceNarration({ ...plan, durationSeconds: 120 }, audio);
-  assert.equal(atCap.plan.durationSeconds, 120);
-  assert.equal(atCap.plan.beats[1].startFrame, 42);
-  assert.throws(() => alignReferenceNarration(plan, [first, audio[1], Buffer.alloc(3600 * 1600)]), /more than 120 seconds/);
 });
 
 test('subprocesses receive a private environment and are terminated on cancel and timeout', async (t) => {

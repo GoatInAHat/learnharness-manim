@@ -1,7 +1,7 @@
 import { constants } from 'node:fs';
 import { copyFile, link, lstat, mkdtemp, open, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { CHUNK_BYTES, VIDEO_BYTES } from './protocol';
+import { CHUNK_BYTES } from './protocol';
 import type { JobView } from './protocol';
 import { privateDirectory } from './runtime';
 
@@ -24,7 +24,7 @@ export class SavedLessons {
       if (!(await lstat(this.directory)).isDirectory() || !(await lstat(folder)).isDirectory()) return;
       const meta = await lstat(metaPath);
       const video = await lstat(join(folder, 'video.mp4'));
-      if (!meta.isFile() || meta.size > maxMetadata || !video.isFile() || video.size <= 0 || video.size > VIDEO_BYTES) return;
+      if (!meta.isFile() || meta.size > maxMetadata || !video.isFile() || !Number.isSafeInteger(video.size) || video.size <= 0) return;
       const value = JSON.parse(await readFile(metaPath, 'utf8'));
       if (!value || value.id !== id || value.size !== video.size || !safeTitle(value.title) ||
           !Number.isSafeInteger(value.createdAt) || value.createdAt <= 0) return;
@@ -60,7 +60,7 @@ export class SavedLessons {
   async keep(id: string, title: string, source: string, signal: AbortSignal, linkTemporary = false) {
     signal.throwIfAborted();
     const video = await lstat(source);
-    if (!uuid.test(id) || !safeTitle(title) || !video.isFile() || video.size <= 0 || video.size > VIDEO_BYTES) {
+    if (!uuid.test(id) || !safeTitle(title) || !video.isFile() || !Number.isSafeInteger(video.size) || video.size <= 0) {
       throw new Error('The finished video could not be kept in Manim.');
     }
     const root = await privateDirectory(this.directory);
@@ -89,6 +89,11 @@ export class SavedLessons {
     const lesson = await this.read(id);
     if (!lesson) throw new Error('This saved lesson is unavailable.');
     return readVideoChunk(join(this.directory, id, 'video.mp4'), lesson.size, offset);
+  }
+
+  async videoPath(id: string) {
+    if (!await this.read(id)) throw new Error('This saved lesson is unavailable.');
+    return join(this.directory, id, 'video.mp4');
   }
 
   async delete(id: string) {

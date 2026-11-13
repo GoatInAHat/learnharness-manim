@@ -1,6 +1,7 @@
 """Fixed offline Cairo scene for the shared semantic math format."""
 
 import math
+import subprocess
 import sys
 import textwrap
 import wave
@@ -17,7 +18,7 @@ from manim import (
 # Isolated Python omits the script directory. This path is trusted packaged code.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from plan import PlanError, load, require, value_and_derivative
-from semantic import DISPLAYS, FPS, MAX_PLAN, Frame, compile_frame, narration_windows, validate
+from semantic import DISPLAYS, FPS, MAX_PLAN, MAX_SOURCE_PLAN, Frame, compile_frame, narration_windows, validate
 
 BACKGROUND = '#111827'
 PAPER = '#F8FAFC'
@@ -373,8 +374,31 @@ def narration_at(job, plan):
     return normalized
 
 
+def render_source(job, plan, height):
+    source = job / 'lesson.py'
+    source.write_text(plan['source'], encoding='utf-8')
+    output = job / 'video.mp4'
+    log = job / 'manim.log'
+    with log.open('wb') as diagnostics:
+        result = subprocess.run([
+            sys.executable, '-I', '-B', '-m', 'manim', 'render', '--silent', '--disable_caching',
+            '--progress_bar', 'none', '-v', 'error', '--format', 'mp4', '--renderer', plan['renderer'],
+            '--resolution', f'{height * 16 // 9},{height}', '--fps', str(FPS), '--media_dir', str(job / 'media'),
+            '--output_file', str(output), str(source), plan['scene'],
+        ], cwd=job, stdin=subprocess.DEVNULL, stdout=diagnostics, stderr=subprocess.STDOUT)
+    if result.returncode != 0 or not output.is_file():
+        with log.open('rb') as diagnostics:
+            diagnostics.seek(max(0, log.stat().st_size - 400))
+            detail = diagnostics.read().decode('utf-8', errors='replace').strip()
+        raise PlanError(f'Manim could not render the named scene. {detail}')
+
+
 def render(job, height, with_audio):
-    plan = load(job / 'plan.json', validate, MAX_PLAN)
+    plan = load(job / 'plan.json', validate, MAX_PLAN, MAX_SOURCE_PLAN)
+    if 'source' in plan:
+        require(not with_audio, 'Direct scenes place their own audio in Python.')
+        render_source(job, plan, height)
+        return
     if with_audio:
         require(narration_at(job, plan) is not None, 'Expected a cue-aligned narration WAV.')
     with tempconfig({

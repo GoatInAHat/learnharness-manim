@@ -1,19 +1,19 @@
 # Manim Explainer for LearnHarness
 
-Manim Explainer renders calculus lessons as local MP4s. It speaks the narration in a [semantic math scene v3 plan](contract/semantic-math-v3.md) using an offline English voice by default. You can choose a silent video or supply a cue-aligned WAV. The lesson renderer uses Manim Community, Cairo and Typst. You can also draft a plan with a model available in LearnHarness.
+Manim Explainer renders [Manim Community Python scenes and existing graph lessons](contract/semantic-math-v3.md) as local MP4s. The teacher and practice tools can author full Python scenes, and the Manim view can import or draft them. Scenes can use the configured offline voice alongside their own audio.
 
-Version 0.3.0 uses Sesame CSM for optional reference narration on Apple Silicon. The macOS Apple Silicon Manim runtime and packaged renderer have been exercised locally. See the qualification workflow for Windows and Linux results.
+Version 0.2.0 adds optional managed Qwen3-TTS reference narration. Earlier Sesame CSM experiments were private trials. The macOS Apple Silicon runtime and packaged renderer have been exercised locally; see the qualification workflow for Windows and Linux results.
 
 ## Install and render
 
 1. Build `manim-explainer.zip` using the commands below. Open **Settings → Community plugins** in LearnHarness 0.6.0 or later and copy the plugins directory path.
 2. Extract the ZIP there so that `<plugins directory>/manim-explainer/dist/manifest.json` exists. Refresh the plugin list and enable **Manim Explainer**. For an upgrade, extract the new ZIP separately, back up the old `dist/`, swap in the extracted `dist/`, and restart LearnHarness. Keep the sibling `data/` folder, which holds the runtime and saved lessons.
 3. Open **Manim Explainer** from the sidebar. Keep the default **Automatic offline voice (English)**, or choose **Silent video** or **Use a cue-aligned WAV**. Check the box showing the downloads for that mode and select **Set up local rendering**. The setup reports verification and progress and can be cancelled. Later renders reuse the downloads. Automatic voice adds about 118 MiB on Apple Silicon or 119 MiB on x64; x64 voice requires AVX2, and Linux voice needs glibc 2.34 or newer.
-4. Import, paste or draft a plan, then select **Render offline**. A supplied WAV must be mono PCM16 at 16–48 kHz, padded to the full lesson and aligned to the plan's cues. Completed videos appear under **Recent lessons** and reopen after restart. Select **Preview** to play or **Save MP4** to export. Incomplete jobs expire after 30 minutes; saved lessons remain until you delete them. If storage prevents a video from being saved, the view shows the error and offers an MP4 export.
+4. Import, paste or draft a plan, then select **Render offline**. For a graph plan, a supplied WAV must be mono PCM16 at 16–48 kHz, padded to the full lesson and aligned to its cues. A Python scene can place the supplied `narration.wav` itself. Completed videos appear under **Recent lessons** and reopen after restart. Select **Preview** to play or **Save MP4** to export. Videos over 96 MiB open in the system video player to avoid buffering the whole file inside LearnHarness. Unstarted jobs expire after 30 minutes. If storage prevents a video from being saved, the view shows the recovery path.
 
 Import, validation and rendering run locally. **Draft plan** sends the brief and public contract to your selected LearnHarness model and may incur provider charges. The resulting JSON goes through the same validator as an imported plan.
 
-Automatic narration uses a fixed offline English voice by default and needs no account or speech API. Each utterance starts at its cue frame. The stock voice requires each utterance to finish nine frames before the next beat or the end of the lesson. If a beat overruns, shorten the utterance or move its cue within the plan's timing rules.
+Automatic narration uses a fixed offline English voice by default and needs no account or speech API. Python scenes receive named, measured narration clips and place them on their own timeline. Existing graph plans place the utterances at their cue frames and require each to finish nine frames before the next beat or the end of the lesson.
 
 ## Optional local reference voice
 
@@ -21,25 +21,16 @@ On Apple Silicon with macOS 14 or later, first run **Set up local rendering** in
 Manim Explainer. Choose **Silent video** for that setup if you only want to
 download the renderer. Then open **Manim Explainer → Settings** and
 choose a WAV you have permission to synthesize. Use 3–30 seconds of mono 24 kHz
-PCM16 speech and enter its exact transcript. Select **Download and enable Sesame**.
-The one-time setup downloads about 2.3 GB into this plugin's private data, uses
-Manim's pinned Python, and runs a synthesis check. You can cancel setup. Use
-**Reinstall Sesame** if the runtime is damaged. The plugin checks the staged
-replacement before swapping it in. Upgrades can use the WAV and transcript already
-saved by version 0.2.x. The prior Qwen runtime files remain in the data folder.
+PCM16 speech and enter its exact transcript. Select **Download and enable reference
+voice**. The one-time setup downloads about 2.2 GB into this plugin's private data,
+reuses Manim's pinned Python, and runs a synthesis check. You can cancel setup. If the local runtime is damaged, select **Reinstall reference
+voice** in the same settings. The replacement is staged and checked before the
+plugin swaps it in.
 
 Automatic rendering from the teacher tool and the Manim view then uses your
 reference voice. Clear the checkbox and save to return to the stock voice. Remove
 the profile to clear its sample and transcript. The installed model stays available
 for the next profile. The voice sample, transcript and synthesis stay on this Mac.
-
-Sesame uses the reference audio and transcript as speaker context. Write narration
-in natural spoken English, with quantities and units spelled out where they help
-pronunciation. Phrasing and punctuation can suggest rhythm, and delivery and wording
-may vary. The renderer measures the generated speech and adjusts beat boundaries
-when necessary, preserving motion, cue offsets and the 120-second limit. Manim's
-[narration guidance](skills/manim-narration/SKILL.md) is included in Draft plan and in
-teacher and practice prompts while Manim Explainer is enabled.
 
 ## Runtime and platform evidence
 
@@ -51,7 +42,7 @@ The first-use download includes micromamba and the full pinned conda-forge stack
 | Linux x64 (glibc 2.17 or later per the render lock) | ~303 MiB | Clean Ubuntu 24.04 hosted runtime, package, render, decode, and update checks. |
 | Windows x64 (standard `C:\Windows` system location) | ~295 MiB | Clean Windows Server 2025 hosted runtime, package, render, decode, and update checks. |
 
-The installer verifies SHA-256 before executing micromamba or extracting a package. It links packages offline with a fresh private environment and checks Python, Manim, Typst, FFmpeg and their native libraries before marking the runtime ready. The optional voice installer verifies the native executable and assets; inference uses only the verified local files. The renderer uses fixed packaged code and math templates. Plans contain bounded arithmetic, camera coordinates and plain text. WAV audio is validated and rewritten to canonical PCM before encoding.
+The installer verifies SHA-256 before executing micromamba or extracting a package. It links packages offline with a fresh private environment and checks Python, Manim, Typst, FFmpeg and their native libraries before marking the runtime ready. The optional voice installer verifies the native executable and assets. Graph plans use fixed packaged code and cue-aligned PCM. Direct scenes run trusted Python with the current user's access in a private job directory. The first direct render uses an existing LaTeX and dvisvgm installation or downloads a pinned private TinyTeX toolchain, approximately 55–75 MiB depending on the platform. Subsequent direct renders verify and reuse the managed toolchain.
 
 ## Build and package
 

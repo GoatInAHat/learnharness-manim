@@ -1,13 +1,12 @@
 import { randomUUID } from 'node:crypto';
-import { appendFile, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { appendFile, lstat, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { CHUNK_BYTES, PLAN_BYTES, WAV_BYTES } from './protocol';
+import { CHUNK_BYTES, PLAN_BYTES, SOURCE_PLAN_BYTES, WAV_BYTES } from './protocol';
 import type { JobView, Narration } from './protocol';
-import { privateDirectory, Runtime } from './runtime';
+import { defaultRenderSeconds, privateDirectory, Runtime } from './runtime';
 import { readVideoChunk, SavedLessons } from './saved-lessons';
 
 const lifetime = 30 * 60 * 1000;
-const renderTime = 12 * 60 * 1000;
 
 export function object(raw: unknown) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Expected an object.');
@@ -27,6 +26,7 @@ export function integer(raw: unknown, max: number) {
 interface Job extends JobView {
   folder: string;
   narration: Narration;
+  timeoutSeconds: number;
   timer: ReturnType<typeof setTimeout>;
   audioSize: number;
   writing: boolean;
@@ -61,7 +61,13 @@ export class Jobs {
   }
 
   async create(plan: unknown, narration: unknown = 'automatic') {
-    const input = text(plan, PLAN_BYTES);
+    const input = text(plan, SOURCE_PLAN_BYTES);
+    if (Buffer.byteLength(input, 'utf8') > PLAN_BYTES) {
+      let source: unknown;
+      try { source = JSON.parse(input)?.source; }
+      catch { /* Large inputs must be valid source envelopes. */ }
+      if (typeof source !== 'string') throw new Error('Graph lesson JSON exceeds its allowed size of 64 KiB.');
+    }
     if (narration !== 'automatic' && narration !== 'silent' && narration !== 'wav') throw new Error('Unknown narration option.');
     if (this.jobs.size + this.starting >= 5) throw new Error('Delete an earlier render before starting another job.');
     this.starting++;
@@ -71,13 +77,14 @@ export class Jobs {
       if (!await this.runtime.ready()) throw new Error('Install the pinned runtime before importing a plan.');
       folder = await mkdtemp(join(await privateDirectory(this.root), 'render-'));
       await writeFile(join(folder, 'plan.json'), input, { mode: 0o600 });
-      await this.runtime.validate(folder, AbortSignal.any([this.signal, AbortSignal.timeout(15_000)]));
+      const validated = await this.runtime.validate(folder, AbortSignal.any([this.signal, AbortSignal.timeout(15_000)]));
       this.signal.throwIfAborted();
       const title = JSON.parse(input).title as string | undefined;
       const id = randomUUID();
       const timer = setTimeout(() => { void this.remove(id).catch(() => undefined); }, lifetime);
       timer.unref();
-      this.jobs.set(id, { id, state: 'upload', folder, title, narration, timer, abort: new AbortController(), audioSize: 0, writing: false });
+      this.jobs.set(id, { id, state: 'upload', folder, title, narration, timer, abort: new AbortController(),
+        audioSize: 0, writing: false, timeoutSeconds: validated?.timeoutSeconds ?? defaultRenderSeconds });
       folder = undefined;
       return id;
     } finally {
@@ -117,7 +124,8 @@ export class Jobs {
     if ([...this.jobs.values()].some(({ state }) => state === 'rendering')) throw new Error('One render can run at a time.');
     this.signal.throwIfAborted();
     job.state = 'rendering';
-    const timeout = AbortSignal.timeout(renderTime);
+    clearTimeout(job.timer);
+    const timeout = AbortSignal.timeout(job.timeoutSeconds * 1000);
     const signal = AbortSignal.any([this.signal, job.abort.signal, timeout]);
     job.work = (async () => {
       try {
@@ -137,7 +145,8 @@ export class Jobs {
         }
       } catch (error) {
         job.state = job.abort.signal.aborted ? 'cancelled' : 'failed';
-        job.error = timeout.aborted ? 'Render exceeded 12 minutes.' : job.state === 'failed' ? (error as Error).message : undefined;
+        job.error = timeout.aborted ? `Render exceeded its ${job.timeoutSeconds}-second timeout.` :
+          job.state === 'failed' ? (error as Error).message : undefined;
       } finally {
         if (job.saved) {
           // Finished jobs leave the active quota as soon as their durable copy exists.
@@ -145,6 +154,10 @@ export class Jobs {
           this.jobs.delete(job.id);
           await rm(job.folder, { recursive: true, force: true }).catch(() => undefined);
         } else {
+          if (job.state !== 'save-error' && this.jobs.has(job.id)) {
+            job.timer = setTimeout(() => { void this.remove(job.id).catch(() => undefined); }, lifetime);
+            job.timer.unref();
+          }
           // Retain a temporary MP4 only if we could not keep the durable copy.
           const entries = await readdir(job.folder);
           await Promise.allSettled(entries.filter((path) => path !== 'video.mp4' || job.state !== 'save-error')
@@ -169,6 +182,17 @@ export class Jobs {
     if (typeof id !== 'string') throw new Error('Expected a lesson ID.');
     await this.saved.delete(id);
     if (this.jobs.has(id)) await this.remove(id);
+  }
+
+  async videoPath(id: unknown) {
+    if (typeof id !== 'string') throw new Error('Expected a lesson ID.');
+    const job = this.jobs.get(id);
+    if (job?.state === 'save-error' && job.size) {
+      const path = join(job.folder, 'video.mp4');
+      const file = await lstat(path);
+      if (file.isFile() && file.size === job.size) return path;
+    }
+    return this.saved.videoPath(id);
   }
 
   async remove(id: unknown, preserveUnsaved = false) {

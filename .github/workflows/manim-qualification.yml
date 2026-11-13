@@ -28,3 +28,5 @@ jobs:
       - run: npm run package
       - name: Qualify package and automatic narrated render
         run: node scripts/qualify-package.mjs
+      - name: Qualify direct source with private TeX and native audio
+        run: node scripts/qualify-direct-tex.mjs

@@ -2,6 +2,7 @@
 
 import bisect
 import json
+import keyword
 import math
 import sys
 from pathlib import Path
@@ -14,6 +15,7 @@ from plan import PlanError, array, fields, line, load, number, require, small_ri
 
 FPS = 30
 MAX_PLAN = 64 * 1024
+MAX_SOURCE_PLAN = 1024 * 1024
 DISPLAYS = ('function', 'points', 'difference', 'secant', 'limit', 'tangent', 'compare')
 NONZERO = {'difference', 'secant', 'limit'}
 ZERO = {'tangent', 'compare'}
@@ -143,7 +145,35 @@ def compile_frame(plan, frame: int) -> Frame:
                  slope=slope, reference=reference, caption=beat.get('caption') if frame >= beat['cueFrame'] else None)
 
 
+def validate_source(raw):
+    fields(raw, ('version', 'title', 'source', 'sceneName'), ('renderer', 'narration', 'timeoutSeconds'))
+    integer(raw['version'], 3, 3)
+    title = line(raw['title'], 72)
+    source = raw['source']
+    require(isinstance(source, str) and source.strip(), 'Provide a Python Manim scene in source.')
+    scene = raw['sceneName']
+    require(isinstance(scene, str) and scene.isidentifier() and not keyword.iskeyword(scene),
+            'Scene name must be a Python class name.')
+    renderer = raw.get('renderer', 'cairo')
+    require(renderer in ('cairo', 'opengl'), 'Renderer must be cairo or opengl.')
+    try:
+        compile(source, 'lesson.py', 'exec', dont_inherit=True)
+    except SyntaxError as error:
+        raise PlanError(f'Python scene syntax error on line {error.lineno}: {error.msg}') from error
+    except UnicodeError as error:
+        raise PlanError('Python scene source must be valid UTF-8.') from error
+    timeout = integer(raw.get('timeoutSeconds', 720), 1, 2_147_483)
+    speech = raw.get('narration', {})
+    require(isinstance(speech, dict), 'Source narration must map names to spoken text.')
+    for name, text in speech.items():
+        line(name, 72)
+        line(text, 340)
+    return dict(title=title, source=source, scene=scene, renderer=renderer, speech=speech, timeout=timeout)
+
+
 def validate(raw):
+    if isinstance(raw, dict) and 'source' in raw:
+        return validate_source(raw)
     fields(raw, ('version', 'title', 'durationSeconds', 'graph', 'beats'))
     integer(raw['version'], 3, 3)
     title = line(raw['title'], 72)
@@ -231,9 +261,11 @@ def narration_windows(plan):
 
 if __name__ == '__main__':
     try:
-        plan = load(sys.argv[1], validate, MAX_PLAN)
+        plan = load(sys.argv[1], validate, MAX_PLAN, MAX_SOURCE_PLAN)
         result = {'valid': True}
-        if sys.argv[2:] == ['--narration']:
+        if 'source' in plan:
+            result.update(source=True, timeoutSeconds=plan['timeout'])
+        elif sys.argv[2:] == ['--narration']:
             result.update(duration=plan['duration'] * FPS, beats=[
                 [beat['narration'], cue, end]
                 for beat, (cue, end) in zip(plan['beats'], narration_windows(plan))
