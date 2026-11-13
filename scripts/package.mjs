@@ -10,6 +10,7 @@ export const staticFiles = [
   ['runtime/voice/POCKET-TTS-LICENSE', 'POCKET-TTS-LICENSE'],
   ...[
     'renderer/scene.py', 'renderer/plan.py', 'renderer/semantic.py', 'renderer/reference_voice.py',
+    'renderer/tex_setup.py', 'runtime/tex/lock.json',
     'contract/semantic-math-v3.md', 'contract/semantic-math-v3.schema.json',
     'runtime/osx-arm64.tsv', 'runtime/linux-64.tsv', 'runtime/win-64.tsv', 'runtime/voice/english.yaml',
     'runtime/voice/qwen-model.tsv', 'runtime/voice/qwen-osx-arm64.txt',

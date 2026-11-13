@@ -9,9 +9,9 @@ import { pipeline } from 'node:stream/promises';
 import { pathToFileURL } from 'node:url';
 import { readReferenceVoice, referenceRevision, referenceSample, referenceSupported, referenceTranscript, referenceURL } from './reference-voice';
 import type { ReferenceVoice } from './reference-voice';
-import { VIDEO_BYTES } from './protocol';
+import { INLINE_VIDEO_BYTES, WAV_BYTES } from './protocol';
 import type { Narration } from './protocol';
-import { emptyNarration, placeUtterance, voiceBinary, voiceConfig, voiceDownloadMiB, voiceModels, voiceModelURL,
+import { emptyNarration, placeUtterance, readUtterance, voiceBinary, voiceConfig, voiceDownloadMiB, voiceModels, voiceModelURL,
   voiceRelease, voiceRevision } from './voice';
 
 const release = '2.9.0-0';
@@ -27,6 +27,16 @@ const windowsRoot = 'C:\\Windows';
 const system32 = join(windowsRoot, 'System32');
 
 export const versions = { python: '3.14.10', manim: '0.22.1', typst: '0.15.2' } as const;
+export const defaultRenderSeconds = 720;
+
+type ValidatedPlan = {
+  valid: boolean;
+  message?: string;
+  duration: number;
+  beats: [string, number, number][];
+  source?: true;
+  timeoutSeconds?: number;
+};
 
 export async function privateDirectory(path: string) {
   await mkdir(path, { recursive: true, mode: 0o700 });
@@ -87,7 +97,8 @@ export function run(program: string, args: string[], cwd: string, env: NodeJS.Pr
         if (!windows) kill('SIGKILL');
         reject(signal.reason);
       } else if (code !== 0 || error) {
-        const detail = (stage === 'Manim render' || stage === 'Reference narration') && code === 2 ? stderr.trim() : '';
+        const detail = ((stage === 'Manim render' || stage === 'Reference narration') && code === 2 ||
+          stage === 'Private TeX setup') ? stderr.trim() : '';
         reject(error ?? new Error(detail || `${stage} failed (exit ${code ?? stoppedBy}).`));
       } else resolve(output);
     });
@@ -429,7 +440,7 @@ export class Runtime {
     const output = await run(runtime.python, ['-I', '-B', join(this.assets, 'assets', 'renderer', 'semantic.py'), join(scratch, 'plan.json'),
       ...(narration ? ['--narration'] : [])],
       scratch, environment(scratch, runtime.prefix), signal, 'Plan validation');
-    const result = JSON.parse(output) as { valid: boolean; message?: string; duration: number; beats: [string, number, number][] };
+    const result = JSON.parse(output) as ValidatedPlan;
     if (result.valid !== true) throw new Error(result.message || 'Invalid lesson plan.');
     return result;
   }
@@ -608,19 +619,17 @@ export class Runtime {
     }
   }
 
-  async prepareNarration(scratch: string, signal: AbortSignal) {
-    const { duration, beats } = await this.validate(scratch, signal, true);
+  private async synthesizeUtterances(scratch: string, signal: AbortSignal, utterances: string[],
+    accept: (index: number, path: string) => Promise<void>) {
     const profile = referenceSupported ? await this.referenceProfile() : null;
     if (profile?.enabled) {
-      const wav = emptyNarration(duration);
       try {
-        await this.synthesizeReference(profile, scratch, beats.map(([words]) => words), signal);
-        for (const [index, [, cue, end]] of beats.entries()) {
-          await placeUtterance(wav, join(scratch, `reference-beat-${index + 1}.wav`), index + 1, cue, end);
+        await this.synthesizeReference(profile, scratch, utterances, signal);
+        for (const [index] of utterances.entries()) {
+          await accept(index, join(scratch, `reference-beat-${index + 1}.wav`));
         }
-        await writeFile(join(scratch, 'narration.wav'), wav, { flag: 'wx', mode: 0o600, signal });
       } finally {
-        await Promise.allSettled(beats.map((_, i) => rm(join(scratch, `reference-beat-${i + 1}.wav`), { force: true })));
+        await Promise.allSettled(utterances.map((_, i) => rm(join(scratch, `reference-beat-${i + 1}.wav`), { force: true })));
       }
       return;
     }
@@ -629,17 +638,16 @@ export class Runtime {
       this.voiceInvalid = true;
       throw new Error(voiceRequired);
     }
-    const wav = emptyNarration(duration);
     const env = { ...environment(scratch), KPOCKET_TTS_ERROR_WITHOUT_EOS: '1' };
     const utterance = join(scratch, 'utterance.wav');
-    for (const [index, [text, cue, end]] of beats.entries()) {
+    for (const [index, text] of utterances.entries()) {
       const beat = index + 1;
       const stage = `Automatic narration for beat ${beat}${voiceCPU}`;
       try {
         await run(join(folder, voiceBinary.executable.file),
           ['generate', '--quiet', '--config', voiceConfig.file, '--voice', 'alba.safetensors', `--text=${text}`, '--output-path', utterance],
           folder, env, AbortSignal.any([signal, AbortSignal.timeout(60_000)]), stage);
-        await placeUtterance(wav, utterance, beat, cue, end);
+        await accept(index, utterance);
       } catch (error) {
         if ((error as Error).name === 'TimeoutError') throw new Error(`${stage} timed out.`);
         throw error;
@@ -647,21 +655,99 @@ export class Runtime {
         await rm(utterance, { force: true });
       }
     }
-    signal.throwIfAborted();
+  }
+
+  async prepareNarration(scratch: string, signal: AbortSignal, plan?: ValidatedPlan) {
+    const { duration, beats } = plan ?? await this.validate(scratch, signal, true);
+    const wav = emptyNarration(duration);
+    await this.synthesizeUtterances(scratch, signal, beats.map(([words]) => words), (index, path) => {
+      const [, cue, end] = beats[index];
+      return placeUtterance(wav, path, index + 1, cue, end);
+    });
     await writeFile(join(scratch, 'narration.wav'), wav, { flag: 'wx', mode: 0o600, signal });
+  }
+
+  private async prepareSourceNarration(scratch: string, signal: AbortSignal, speech: Record<string, string>) {
+    const entries = Object.entries(speech);
+    const clips: [string, { path: string; duration: number }][] = [];
+    if (entries.length) {
+      const folder = await privateDirectory(join(scratch, 'voice'));
+      await this.synthesizeUtterances(scratch, signal, entries.map(([, words]) => words), async (index, path) => {
+        const pcm = await readUtterance(path, index + 1, WAV_BYTES - 44);
+        const file = `voice/${index + 1}.wav`;
+        await writeFile(join(folder, `${index + 1}.wav`), pcm, { flag: 'wx', mode: 0o600, signal });
+        clips.push([entries[index][0], { path: file, duration: (pcm.length - 44) / 48_000 }]);
+      });
+    }
+    await writeFile(join(scratch, 'voice.json'), JSON.stringify(Object.fromEntries(clips)),
+      { flag: 'wx', mode: 0o600, signal });
+  }
+
+  private async sourceEnvironment(scratch: string, runtime: { python: string; prefix: string }, signal: AbortSignal) {
+    const env = environment(scratch, runtime.prefix);
+    const tex = join(this.data, 'tex', 'bin');
+    const mac = process.platform === 'darwin' ? ['/Library/TeX/texbin', '/opt/homebrew/bin'] : [];
+    const bins = await readdir(tex, { withFileTypes: true }).catch((error) => {
+      if (error.code === 'ENOENT') return [];
+      throw error;
+    });
+    const paths = [...(env.PATH ?? '').split(delimiter), tex,
+      ...bins.filter((entry) => entry.isDirectory()).map((entry) => join(tex, entry.name)),
+      ...mac, ...(process.env.PATH ?? '').split(delimiter)].filter(Boolean);
+    const available = await Promise.all(['latex', 'dvisvgm'].map(async (name) => {
+      const executable = windows ? `${name}.exe` : name;
+      for (const folder of paths) {
+        try {
+          await access(join(folder, executable), constants.X_OK);
+          return true;
+        } catch { /* Check the next executable directory. */ }
+      }
+      return false;
+    }));
+    let texError: string | undefined;
+    if (!available.every(Boolean)) {
+      try {
+        const asset = (folder: string, file: string) => join(this.assets, 'assets', folder, file);
+        const setup = AbortSignal.any([signal, AbortSignal.timeout(3 * 60 * 1000)]);
+        const bin = await run(runtime.python, ['-I', '-B', asset('renderer', 'tex_setup.py'), this.data,
+          asset('runtime/tex', 'lock.json')], scratch, env, setup, 'Private TeX setup');
+        paths.unshift(bin.trim());
+      } catch (error) {
+        signal.throwIfAborted();
+        texError = (error as Error).message;
+      }
+    }
+    env.PATH = paths.join(delimiter);
+    env.TEXMFVAR = join(scratch, 'texmf-var');
+    env.TEXMFCONFIG = join(scratch, 'texmf-config');
+    env.TEXMFCACHE = env.TEXMFVAR;
+    return { env, texError };
   }
 
   async render(scratch: string, signal: AbortSignal, narration: Narration, height: 720 | 1080 = 720) {
     const runtime = await this.ready();
     if (!runtime) throw new Error('Install the pinned runtime before rendering.');
-    if (narration === 'automatic') await this.prepareNarration(scratch, signal);
-    const env = environment(scratch, runtime.prefix);
-    await run(runtime.python, ['-I', '-B', join(this.assets, 'assets', 'renderer', 'scene.py'), scratch, String(height),
-      narration === 'silent' ? 'silent' : 'wav'],
-      scratch, env, signal, 'Manim render');
+    const plan = await this.validate(scratch, signal, narration === 'automatic');
+    if (plan.source) {
+      const source = JSON.parse(await readFile(join(scratch, 'plan.json'), 'utf8')) as { narration?: Record<string, string> };
+      await this.prepareSourceNarration(scratch, signal, narration === 'automatic' ? source.narration ?? {} : {});
+    } else if (narration === 'automatic') {
+      await this.prepareNarration(scratch, signal, plan);
+    }
+    const { env, texError } = plan.source ? await this.sourceEnvironment(scratch, runtime, signal) :
+      { env: environment(scratch, runtime.prefix), texError: undefined };
+    try {
+      await run(runtime.python, ['-I', '-B', join(this.assets, 'assets', 'renderer', 'scene.py'), scratch, String(height),
+        plan.source || narration === 'silent' ? 'silent' : 'wav'],
+        scratch, env, signal, 'Manim render');
+    } catch (error) {
+      signal.throwIfAborted();
+      if (texError) throw new Error(`${(error as Error).message}\n${texError}`, { cause: error });
+      throw error;
+    }
     const path = join(scratch, 'video.mp4');
     const pcm = join(scratch, 'pcm.wav');
-    if (narration !== 'silent') {
+    if (!plan.source && narration !== 'silent') {
       const ffmpeg = await runtimeFile(runtime.prefix, ffmpegAt(runtime.prefix));
       const muxed = join(scratch, 'muxed.mp4');
       await run(ffmpeg, ['-nostdin', '-hide_banner', '-loglevel', 'error', '-n', '-i', path, '-i', pcm,
@@ -670,7 +756,14 @@ export class Runtime {
       await rename(muxed, path);
     }
     const video = await lstat(path);
-    if (!video.isFile() || video.size <= 0 || video.size > VIDEO_BYTES) throw new Error('Expected a nonempty MP4 of at most 96 MiB.');
+    if (!video.isFile() || !Number.isSafeInteger(video.size) || video.size <= 0) throw new Error('Expected a nonempty MP4.');
+    if (!plan.source && video.size > INLINE_VIDEO_BYTES) throw new Error('Graph lesson MP4 exceeds 96 MiB.');
+    if (plan.source) {
+      const ffprobe = await runtimeFile(runtime.prefix, join(dirname(ffmpegAt(runtime.prefix)), windows ? 'ffprobe.exe' : 'ffprobe'));
+      const length = await run(ffprobe, ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=duration',
+        '-of', 'csv=p=0', path], scratch, env, signal, 'Manim video verification');
+      if (!(Number(length) > 0 && Number.isFinite(Number(length)))) throw new Error('Manim did not produce a playable video stream.');
+    }
     if (!windows) await chmod(path, 0o600);
     signal.throwIfAborted();
     return video.size;

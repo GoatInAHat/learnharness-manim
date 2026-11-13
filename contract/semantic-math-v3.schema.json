@@ -1,36 +1,58 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "Shared semantic math scene v3",
-  "type": "object",
-  "additionalProperties": false,
-  "required": ["version", "title", "durationSeconds", "graph", "beats"],
-  "properties": {
-    "version": { "const": 3 },
-    "title": { "type": "string", "minLength": 1, "maxLength": 72 },
-    "durationSeconds": { "type": "integer", "minimum": 90, "maximum": 120 },
-    "graph": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["domain", "variable", "functionName", "xLabel", "yLabel", "expression"],
+  "oneOf": [
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "title", "source", "sceneName"],
       "properties": {
-        "domain": {
-          "type": "array", "minItems": 2, "maxItems": 2,
-          "items": { "$ref": "#/definitions/coordinate" }
+        "version": { "const": 3 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 72 },
+        "source": { "type": "string", "minLength": 1 },
+        "sceneName": { "type": "string", "minLength": 1 },
+        "renderer": { "enum": ["cairo", "opengl"] },
+        "narration": {
+          "type": "object",
+          "propertyNames": { "minLength": 1, "maxLength": 72 },
+          "additionalProperties": { "type": "string", "minLength": 1, "maxLength": 340 }
         },
-        "variable": { "type": "string", "pattern": "^[a-z]$" },
-        "functionName": { "type": "string", "pattern": "^[a-z]$" },
-        "xLabel": { "type": "string", "minLength": 1, "maxLength": 28 },
-        "yLabel": { "type": "string", "minLength": 1, "maxLength": 28 },
-        "slopeUnit": { "type": "string", "minLength": 1, "maxLength": 14 },
-        "expression": { "$ref": "#/definitions/expression" }
+        "timeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 2147483 }
       }
     },
-    "beats": {
-      "type": "array", "minItems": 5, "maxItems": 8,
-      "items": { "$ref": "#/definitions/beat" }
-    }
-  },
+    { "$ref": "#/definitions/graphPlan" }
+  ],
   "definitions": {
+    "graphPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "title", "durationSeconds", "graph", "beats"],
+      "properties": {
+        "version": { "const": 3 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 72 },
+        "durationSeconds": { "type": "integer", "minimum": 90, "maximum": 120 },
+        "graph": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["domain", "variable", "functionName", "xLabel", "yLabel", "expression"],
+          "properties": {
+            "domain": {
+              "type": "array", "minItems": 2, "maxItems": 2,
+              "items": { "$ref": "#/definitions/coordinate" }
+            },
+            "variable": { "type": "string", "pattern": "^[a-z]$" },
+            "functionName": { "type": "string", "pattern": "^[a-z]$" },
+            "xLabel": { "type": "string", "minLength": 1, "maxLength": 28 },
+            "yLabel": { "type": "string", "minLength": 1, "maxLength": 28 },
+            "slopeUnit": { "type": "string", "minLength": 1, "maxLength": 14 },
+            "expression": { "$ref": "#/definitions/expression" }
+          }
+        },
+        "beats": {
+          "type": "array", "minItems": 5, "maxItems": 8,
+          "items": { "$ref": "#/definitions/beat" }
+        }
+      }
+    },
     "coordinate": { "type": "number", "minimum": -1000, "maximum": 1000 },
     "frame": { "type": "integer", "minimum": 0, "maximum": 3599 },
     "expression": {

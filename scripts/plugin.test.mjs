@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, truncate, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { createHash, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -9,7 +9,8 @@ import { bundleTestModule } from './bundle-test-module.mjs';
 import { pack, packageFiles, pluginId, zipTool } from './package.mjs';
 
 const require = createRequire(import.meta.url);
-const [{ Jobs }, { environment, run, Runtime }, { CHUNK_BYTES, WAV_BYTES }, { emptyNarration, placeUtterance }, { SavedLessons }] = await Promise.all(
+const [{ Jobs }, { environment, run, Runtime }, { CHUNK_BYTES, INLINE_VIDEO_BYTES, PLAN_BYTES, WAV_BYTES },
+  { emptyNarration, placeUtterance }, { SavedLessons }] = await Promise.all(
   ['src/jobs.ts', 'src/runtime.ts', 'src/protocol.ts', 'src/voice.ts', 'src/saved-lessons.ts'].map(bundleTestModule),
 );
 
@@ -34,7 +35,7 @@ test('standalone package extracts to the LearnHarness plugin layout and activate
   const manifest = JSON.parse(await readFile(join(dist, 'manifest.json'), 'utf8'));
   assert.equal(manifest.id, pluginId);
   assert.equal(manifest.apiVersion, 1);
-  assert.equal(manifest.version, '0.2.1');
+  assert.equal(manifest.version, '0.4.0');
   assert.equal(manifest.minAppVersion, '0.6.0');
   for (const file of [manifest.main, manifest.backend, manifest.styles]) assert.ok(packageFiles.includes(file));
   const main = await readFile(join(dist, manifest.main));
@@ -42,11 +43,13 @@ test('standalone package extracts to the LearnHarness plugin layout and activate
 
   const operations = new Map();
   const cleanup = [];
+  const tools = [];
   const abort = new AbortController();
   require(join(dist, manifest.backend)).activate({
     directory: dist, dataDirectory: join(plugin, 'data'), signal: abort.signal,
     handle: (name, handler) => { operations.set(name, handler); return () => operations.delete(name); },
-    cleanup: (fn) => cleanup.push(fn), registerTools: () => () => {},
+    cleanup: (fn) => cleanup.push(fn), registerInstructions: () => () => {},
+    registerTools: ({ create }) => { tools.push(...create()); return () => {}; },
   });
   t.after(async () => {
     abort.abort();
@@ -56,6 +59,7 @@ test('standalone package extracts to the LearnHarness plugin layout and activate
   assert.equal(status.ready, false);
   assert.equal(status.install, null);
   assert.equal(status.voiceReady, false);
+  assert.deepEqual(tools.map(({ name }) => name), ['manim_render_scene', 'manim_render_lesson']);
   assert.throws(() => operations.get('repairReferenceVoice')({ confirmed: false }), /Confirm the reference voice download/);
   assert.throws(() => operations.get('install')({ confirmed: 'true', narration: 'automatic' }), /Confirm the local setup download/);
   assert.throws(() => operations.get('install')({ confirmed: true, narration: 'unexpected' }), /Select a narration option/);
@@ -283,6 +287,31 @@ test('jobs default to automatic narration and require an explicit silent or WAV 
     await jobs.remove(id);
   }
   assert.deepEqual(rendered, ['automatic', 'silent', 'wav']);
+});
+
+test('source jobs accept larger inputs and keep videos beyond the inline preview limit', async (t) => {
+  const folder = await scratch(t);
+  const size = INLINE_VIDEO_BYTES + 1;
+  const jobs = new Jobs(folder, {
+    ready: async () => true,
+    validate: async () => ({ source: true }),
+    render: async (directory) => {
+      const path = join(directory, 'video.mp4');
+      await writeFile(path, 'fixture');
+      await truncate(path, size);
+      return size;
+    },
+  }, new AbortController().signal);
+  t.after(() => jobs.dispose());
+  await assert.rejects(jobs.create(JSON.stringify({ graph: 'x'.repeat(PLAN_BYTES) })), /64 KiB/);
+  const id = await jobs.create(JSON.stringify({ title: 'Large source', source: ' '.repeat(PLAN_BYTES) }));
+  jobs.start(id);
+  for (let i = 0; i < 100 && !(await jobs.views()).some((job) => job.saved); i++) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.ok((await jobs.views()).some((job) => job.id === id && job.saved && job.size === size));
+  assert.equal(await jobs.videoPath(id), join(folder, 'saved', id, 'video.mp4'));
+  await assert.rejects(jobs.videoPath('../video.mp4'), /unavailable/);
 });
 
 test('PCM placement starts at the exact cue and rejects truncation, silence and overrun', async (t) => {

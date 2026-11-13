@@ -1,0 +1,129 @@
+{
+  "roots": [
+    {
+      "platform": "darwin",
+      "binary": "universal-darwin",
+      "filename": "TinyTeX-1-darwin-v2026.11.tar.xz",
+      "size": 67211812,
+      "sha256": "9416a257c4caea2f82351fa2f89252b8bd75dceeb0ce6e442d25530b1922a02d",
+      "url": "https://github.com/rstudio/tinytex-releases/releases/download/v2026.11/TinyTeX-1-darwin-v2026.11.tar.xz"
+    },
+    {
+      "platform": "linux-x64",
+      "binary": "x86_64-linux",
+      "filename": "TinyTeX-1-linux-x86_64-v2026.11.tar.xz",
+      "size": 53616060,
+      "sha256": "5b75befa848deae702ae6fa12ff0eef3f110d7e4e2a979ae99f101eba3c9c70d",
+      "url": "https://github.com/rstudio/tinytex-releases/releases/download/v2026.11/TinyTeX-1-linux-x86_64-v2026.11.tar.xz"
+    },
+    {
+      "platform": "win32-x64",
+      "binary": "windows",
+      "filename": "TinyTeX-1-windows-v2026.11.exe",
+      "size": 73710178,
+      "sha256": "375e8adec0177cd9ec6a1f8c76efe0c22b1a0c260e76a00386bcea52d88e5354",
+      "url": "https://github.com/rstudio/tinytex-releases/releases/download/v2026.11/TinyTeX-1-windows-v2026.11.exe"
+    }
+  ],
+  "overlays": [
+    {
+      "name": "adjustbox",
+      "sha256": "bc4336e6e27c2d5bda8bd23a0578718d6b7228fddea85a5524f37e0b56ea9922",
+      "size": 13776,
+      "url": "https://texlive.info/tlnet-archive/2026/11/01/tlnet/archive/adjustbox.tar.xz",
+      "revision": "78101"
+    },
+    {
+      "name": "collectbox",
+      "sha256": "214525b8a0a77a0abccc39c3ed430da69ba983a910b36001e56541a076160be0",
+      "size": 2888,
+      "url": "https://texlive.info/tlnet-archive/2026/11/01/tlnet/archive/collectbox.tar.xz",
+      "revision": "77682"
+    },
+    {
+      "name": "currfile",
+      "sha256": "81eb6eba59764b6ccb7210f8e1c928eb7b2d8d57d3a59b0411b027dab8d549f4",
+      "size": 3876,
+      "url": "https://texlive.info/tlnet-archive/2026/11/01/tlnet/archive/currfile.tar.xz",
+      "revision": "77682"
+    },
+    {
+      "name": "dvisvgm",
+      "sha256": "6cfb7920d4c6d5314eef2fcb96e132ab588cd514c65fc87755562225af885b4f",
+      "size": 880,
+      "url": "https://texlive.info/tlnet-archive/2026/11/01/tlnet/archive/dvisvgm.tar.xz",
+      "revision": "77830"
+    },
+    {
+      "name": "filemod",
+      "sha256": "7317e50c1de567840e56b738b5ceea3a112c51ce07785140c013e3861965016e",
+      "size": 3572,
+      "url": "https://texlive.info/tlnet-archive/2026/11/01/tlnet/archive/filemod.tar.xz",
+      "revision": "77682"
+    },
+    {
+      "name": "gincltex",
+      "sha256": "b955721f34917499f710522cdf95b67fd97c29fb61209cd2430e5e83fcf9a5e0",
+      "size": 1924,
+      "url": "https://texlive.info/tlnet-archive/2026/11/01/tlnet/archive/gincltex.tar.xz",
+      "revision": "78251"
+    },
+    {
+      "name": "preview",
+      "sha256": "91fad28da99be4fee077ea2779f609b341c0d0e1b4816623ab85e635665e32f9",
+      "size": 6864,
+      "url": "https://texlive.info/tlnet-archive/2026/11/01/tlnet/archive/preview.tar.xz",
+      "revision": "71662"
+    },
+    {
+      "name": "standalone",
+      "sha256": "6daa00b081106b1c240a11732155287d9933e612f3e9a045ee40824f68b0ba98",
+      "size": 12468,
+      "url": "https://texlive.info/tlnet-archive/2026/11/01/tlnet/archive/standalone.tar.xz",
+      "revision": "77682"
+    },
+    {
+      "name": "svn-prov",
+      "sha256": "74cf47446fd3ebe606dd944f16133571e79c15f85b7223bf5e5eed5692fb74b8",
+      "size": 2424,
+      "url": "https://texlive.info/tlnet-archive/2026/11/01/tlnet/archive/svn-prov.tar.xz",
+      "revision": "79618"
+    },
+    {
+      "name": "babel-english",
+      "sha256": "615f7373205ae2bd19390a0aa2859d4e7617c0a28e780ccfdcbe9053e1b8d448",
+      "size": 3032,
+      "url": "https://texlive.info/tlnet-archive/2026/11/01/tlnet/archive/babel-english.tar.xz",
+      "revision": "77682"
+    },
+    {
+      "name": "hyphen-english",
+      "sha256": "cb22c0c51786d47aff5cef7dc6d0a47ab291d6da88c21ac6a9929f4409a456ab",
+      "size": 41348,
+      "url": "https://texlive.info/tlnet-archive/2026/11/01/tlnet/archive/hyphen-english.tar.xz",
+      "revision": "78069"
+    },
+    {
+      "name": "dvisvgm.universal-darwin",
+      "sha256": "c032549f12efc96a8894aa56fbb23a73ec6a2da934bfb2109a5970bf7faa0937",
+      "size": 2470940,
+      "url": "https://texlive.info/tlnet-archive/2026/11/01/tlnet/archive/dvisvgm.universal-darwin.tar.xz",
+      "revision": "77987"
+    },
+    {
+      "name": "dvisvgm.x86_64-linux",
+      "sha256": "d06f6ab32aec34a40f0be0252ee8e6fb1afa8f4a5105fce0e566885b88306612",
+      "size": 1864812,
+      "url": "https://texlive.info/tlnet-archive/2026/11/01/tlnet/archive/dvisvgm.x86_64-linux.tar.xz",
+      "revision": null
+    },
+    {
+      "name": "dvisvgm.windows",
+      "sha256": "e30ff1445a132120bd5c2323b46611843dafa7d05f70225254fb37604542ee3c",
+      "size": 1662092,
+      "url": "https://texlive.info/tlnet-archive/2026/11/01/tlnet/archive/dvisvgm.windows.tar.xz",
+      "revision": null
+    }
+  ],
+  "provenance": "TeX Live dated 2026/11/01 repo verified with pinned TeX Live keyring, macOS local overlay independently qualified"
+}

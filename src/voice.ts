@@ -48,9 +48,8 @@ export function emptyNarration(durationFrames: number) {
   return wav;
 }
 
-export async function placeUtterance(wav: Buffer, path: string, index: number, cue: number, end: number) {
+export async function readUtterance(path: string, index: number, limit: number) {
   const stat = await lstat(path);
-  const limit = (end - cue) * frameBytes;
   if (stat.size > header.length + limit) {
     throw new Error(`Automatic narration for beat ${index} exceeds its cue window. Shorten the narration, adjust the timing, or select a different audio option.`);
   }
@@ -61,10 +60,12 @@ export async function placeUtterance(wav: Buffer, path: string, index: number, c
       speech.readUInt32LE(4) !== speech.length - 8 || !speech.subarray(8, 40).equals(header.subarray(8, 40)) ||
       speech.readUInt32LE(40) !== speech.length - header.length) throw invalid();
   for (let offset = header.length; offset < speech.length; offset += 2) {
-    if (Math.abs(speech.readInt16LE(offset)) >= 16) {
-      speech.copy(wav, header.length + cue * frameBytes, header.length);
-      return;
-    }
+    if (Math.abs(speech.readInt16LE(offset)) >= 16) return speech;
   }
   throw new Error(`Automatic narration for beat ${index} is silent.`);
+}
+
+export async function placeUtterance(wav: Buffer, path: string, index: number, cue: number, end: number) {
+  const speech = await readUtterance(path, index, (end - cue) * frameBytes);
+  speech.copy(wav, header.length + cue * frameBytes, header.length);
 }

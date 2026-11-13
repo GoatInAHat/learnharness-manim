@@ -122,16 +122,19 @@ def small_rise(node, a, h):
     raise PlanError('Unknown compiled arithmetic operator.')
 
 
-def load(path, validate, limit):
+def load(path, validate, limit, source_limit=None):
     def unique(pairs):
         result = dict(pairs)
         require(len(result) == len(pairs), 'Lesson JSON contains a repeated key.')
         return result
 
     try:
+        read_limit = source_limit or limit
         with Path(path).open('rb') as source:
-            data = source.read(limit + 1)
-        require(0 < len(data) <= limit, 'Lesson JSON is empty or too large.')
-        return validate(json.loads(data.decode('utf-8'), object_pairs_hook=unique))
+            data = source.read(read_limit + 1)
+        require(0 < len(data) <= read_limit, 'Lesson JSON is empty or too large.')
+        value = json.loads(data.decode('utf-8'), object_pairs_hook=unique)
+        require(len(data) <= limit or isinstance(value, dict) and 'source' in value, 'Graph lesson JSON exceeds 64 KiB.')
+        return validate(value)
     except (ArithmeticError, RecursionError, UnicodeError, json.JSONDecodeError) as error:
         raise PlanError('Invalid JSON or undefined curve arithmetic.') from error

@@ -3,10 +3,10 @@ import { join } from 'node:path';
 import { Type } from 'typebox';
 import type { PluginBackendModule, PluginModelSpec } from 'learnharness-plugin-api';
 import { integer, Jobs, object, text } from './jobs';
-import { PLAN_BYTES } from './protocol';
+import { PLAN_BYTES, SOURCE_PLAN_BYTES } from './protocol';
 import type { DraftModel, Status } from './protocol';
 import { referenceSupported } from './reference-voice';
-import { privateDirectory, Runtime } from './runtime';
+import { privateDirectory, run, Runtime } from './runtime';
 
 interface Installation {
   abort: AbortController;
@@ -115,6 +115,21 @@ export const activate: PluginBackendModule['activate'] = (ctx) => {
     const { id, offset } = object(raw);
     return jobs.chunk(id, offset);
   }));
+  ctx.cleanup(ctx.handle('openVideo', async (raw) => {
+    ctx.signal.throwIfAborted();
+    const video = await jobs.videoPath(object(raw).id);
+    const program = process.platform === 'darwin' ? '/usr/bin/open' :
+      process.platform === 'win32' ? 'C:\\Windows\\System32\\rundll32.exe' : 'xdg-open';
+    const args = process.platform === 'win32' ? ['url.dll,FileProtocolHandler', video] : [video];
+    try {
+      await run(program, args, ctx.dataDirectory, process.env,
+        AbortSignal.any([ctx.signal, AbortSignal.timeout(10_000)]), 'Open video');
+      return { path: video };
+    } catch (error) {
+      ctx.signal.throwIfAborted();
+      throw new Error(`Could not open the video player. Open ${video} directly.`, { cause: error });
+    }
+  }));
   ctx.cleanup(ctx.handle('remove', async (raw) => { await jobs.remove(object(raw).id); return true; }));
   ctx.cleanup(ctx.handle('deleteSaved', async (raw) => { await jobs.deleteSaved(object(raw).id); return true; }));
 
@@ -152,13 +167,13 @@ export const activate: PluginBackendModule['activate'] = (ctx) => {
       const result = await ctx.inference.complete({
         model, purpose: 'user', signal, options: { maxTokens: 5200, maxRetries: 0 },
         context: {
-          systemPrompt: `Draft a bounded declarative teaching scene matching the supplied public contract. Return only JSON, with no code or fences. Start from a simple curve that fits the full scene.\n\n${contract}\n\n${schema}`,
+          systemPrompt: `Draft a teaching video as direct Manim Python source in the JSON form described below. Return only the JSON object with the full Python program in its source field. Use continuous diagrams and purposeful mathematical transformations where they explain the idea.\n\n${contract}\n\n${schema}`,
           messages: [{ role: 'user', content: brief, timestamp: Date.now() }],
         },
       });
       signal.throwIfAborted();
       if (result.stopReason !== 'stop') throw new Error('The model did not finish a usable draft.');
-      const plan = text(result.content.filter((block) => block.type === 'text').map((block) => block.text).join('').trim(), PLAN_BYTES);
+      const plan = text(result.content.filter((block) => block.type === 'text').map((block) => block.text).join('').trim(), SOURCE_PLAN_BYTES);
       folder = await mkdtemp(join(await privateDirectory(scratch), 'draft-'));
       await writeFile(join(folder, 'plan.json'), plan, { mode: 0o600 });
       await runtime.validate(folder, signal);
@@ -169,27 +184,50 @@ export const activate: PluginBackendModule['activate'] = (ctx) => {
     }
   }));
 
+  ctx.cleanup(ctx.registerInstructions({
+    agents: [...nativeAgents],
+    text: 'For new Manim videos, use manim_render_scene with complete ordinary Manim Python. Animate the mathematical objects and relationships that explain the idea. The graph-plan tool is for replaying existing graph lessons.',
+  }));
   ctx.cleanup(ctx.registerTools({
     agents: [...nativeAgents],
     create: () => [{
+      name: 'manim_render_scene', label: 'Render Manim Python scene',
+      replay: 'never',
+      description: 'Author and render any ordinary Manim Community Scene with complete Python source. Use Manim animations, transformations, camera moves, updaters, native audio, and available dependencies directly. Prefer continuous mathematical motion when it helps explain the lesson. Optional narration maps clip names to text spoken by the configured local voice. In source, read voice.json in the working directory. Each clip has a path and duration in seconds. Place it with self.add_sound and use its measured duration to time the animation. Find completed videos in Manim Explainer → Recent lessons.',
+      parameters: Type.Object({
+        title: Type.String({ minLength: 1, maxLength: 72 }),
+        source: Type.String({ minLength: 1, maxLength: SOURCE_PLAN_BYTES }),
+        sceneName: Type.String({ minLength: 1 }),
+        renderer: Type.Optional(Type.Union([Type.Literal('cairo'), Type.Literal('opengl')])),
+        narration: Type.Optional(Type.Record(Type.String(), Type.String({ minLength: 1, maxLength: 340 }))),
+        timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 2_147_483 })),
+      }, { additionalProperties: false }),
+      async execute(_call, input, signal) {
+        return queueLesson(JSON.stringify({ ...object(input), version: 3 }), 'automatic', signal);
+      },
+    }, {
       name: 'manim_render_lesson', label: 'Render Manim lesson',
-      description: 'Render an already validated semantic math scene v3 JSON plan. Requires the local runtime and defaults to automatic narration with the installed offline voice. Use silent only when requested. Find completed videos under Recent lessons in Manim Explainer.',
+      description: 'Replay an existing semantic math graph plan. For new Manim videos, use manim_render_scene. Find completed videos under Recent lessons in Manim Explainer.',
       parameters: Type.Object({ plan: Type.String({ minLength: 1, maxLength: PLAN_BYTES }),
         narration: Type.Optional(Type.Union([Type.Literal('automatic'), Type.Literal('silent')])) }, { additionalProperties: false }),
       async execute(_call, input, signal) {
-        signal?.throwIfAborted();
         const { plan, narration } = object(input);
         if (narration !== undefined && narration !== 'automatic' && narration !== 'silent') throw new Error('Unknown narration option.');
-        const id = await jobs.create(plan, narration);
-        try {
-          signal?.throwIfAborted();
-          jobs.start(id);
-        } catch (error) {
-          await jobs.remove(id);
-          throw error;
-        }
-        return { content: [{ type: 'text', text: `Render queued in Manim Explainer. Job ${id}.` }], details: { id } };
+        return queueLesson(plan, narration, signal);
       },
     }],
   }));
+
+  async function queueLesson(plan: unknown, narration: unknown, signal?: AbortSignal) {
+    signal?.throwIfAborted();
+    const id = await jobs.create(plan, narration);
+    try {
+      signal?.throwIfAborted();
+      jobs.start(id);
+    } catch (error) {
+      await jobs.remove(id);
+      throw error;
+    }
+    return { content: [{ type: 'text' as const, text: `Render queued in Manim Explainer. Job ${id}.` }], details: { id } };
+  }
 };

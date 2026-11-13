@@ -1,8 +1,8 @@
 import { constants } from 'node:fs';
 import { copyFile, mkdtemp, open, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { PLAN_BYTES, WAV_BYTES } from './protocol';
-import { privateDirectory, Runtime } from './runtime';
+import { SOURCE_PLAN_BYTES, WAV_BYTES } from './protocol';
+import { defaultRenderSeconds, privateDirectory, Runtime } from './runtime';
 
 async function copyBounded(source: string, destination: string, limit: number) {
   const file = await open(resolve(source), constants.O_RDONLY | constants.O_NONBLOCK);
@@ -55,13 +55,13 @@ async function main(args: string[]) {
     if (!await runtime.ready()) throw new Error('Install the pinned runtime before importing a plan.');
     const scratch = await mkdtemp(join(await privateDirectory(join(resolve(root), 'cli-jobs')), 'render-'));
     try {
-      await copyBounded(plan, join(scratch, 'plan.json'), PLAN_BYTES);
-      const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(12 * 60 * 1000)]);
-      await runtime.validate(scratch, signal);
+      await copyBounded(plan, join(scratch, 'plan.json'), SOURCE_PLAN_BYTES);
+      const validated = await runtime.validate(scratch, AbortSignal.any([abort.signal, AbortSignal.timeout(15_000)]));
       if (command === 'validate') {
         console.log('Plan valid.');
         return;
       }
+      const signal = AbortSignal.any([abort.signal, AbortSignal.timeout((validated.timeoutSeconds ?? defaultRenderSeconds) * 1000)]);
       const narration = command === 'render' && wav === '--silent' ? 'silent' : wav ? 'wav' : 'automatic';
       if (narration === 'wav') await copyBounded(wav, join(scratch, 'narration.wav'), WAV_BYTES);
       await runtime.render(scratch, signal, narration, command === 'compare' ? 1080 : 720);

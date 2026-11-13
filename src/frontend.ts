@@ -1,5 +1,5 @@
 import type { PluginFrontendModule } from 'learnharness-plugin-api';
-import { CHUNK_BYTES, PLAN_BYTES, VIDEO_BYTES, WAV_BYTES } from './protocol';
+import { CHUNK_BYTES, INLINE_VIDEO_BYTES, SOURCE_PLAN_BYTES, WAV_BYTES } from './protocol';
 import type { ReferenceVoice } from './reference-voice';
 import type { DraftModel, JobView, Narration, Status } from './protocol';
 
@@ -181,7 +181,7 @@ export const activate: PluginFrontendModule['activate'] = (ctx) => {
     planFile.accept = '.json,application/json';
     const plan = document.createElement('textarea');
     plan.rows = 7;
-    plan.maxLength = PLAN_BYTES;
+    plan.maxLength = SOURCE_PLAN_BYTES;
     const audio = document.createElement('input');
     audio.type = 'file';
     audio.accept = '.wav,audio/wav';
@@ -192,7 +192,7 @@ export const activate: PluginFrontendModule['activate'] = (ctx) => {
     const importBox = document.createElement('section');
     importBox.className = 'lh-manim-panel';
     root.append(importBox);
-    field(planFile, 'Import semantic math plan v3', importBox);
+    field(planFile, 'Import Manim lesson JSON', importBox);
     field(plan, 'Lesson plan JSON', importBox);
     field(narration, 'Narration', importBox);
     const audioField = field(audio, 'Narration WAV', importBox);
@@ -201,7 +201,7 @@ export const activate: PluginFrontendModule['activate'] = (ctx) => {
     planFile.addEventListener('change', () => report(async () => {
       const file = planFile.files?.[0];
       if (!file) return;
-      if (!file.size || file.size > PLAN_BYTES) throw new Error('Plan JSON exceeds 64 KiB or is empty.');
+      if (!file.size || file.size > SOURCE_PLAN_BYTES) throw new Error('Plan JSON exceeds 1 MiB or is empty.');
       const value = new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer());
       if (signal.aborted) return;
       plan.value = value;
@@ -350,7 +350,13 @@ export const activate: PluginFrontendModule['activate'] = (ctx) => {
     }
 
     function updateControls() {
-      const automatic = narration.value === 'automatic';
+      let automatic = narration.value === 'automatic';
+      if (automatic && plan.value.trim()) {
+        try {
+          const value = JSON.parse(plan.value);
+          if (typeof value?.source === 'string') automatic = Boolean(Object.keys(value.narration ?? {}).length);
+        } catch { /* The render validator reports malformed plans. */ }
+      }
       const needsRuntime = Boolean(current?.supported && !current.ready);
       const needsVoice = automatic && !current?.referenceVoiceEnabled && Boolean(current?.voiceDownloadMiB) && !current?.voiceReady;
       const setupKey = current?.setupKey ?? '';
@@ -409,7 +415,13 @@ export const activate: PluginFrontendModule['activate'] = (ctx) => {
     function jobRow(job: JobView) {
       const row = document.createElement('li');
       row.append(job.saved ? (job.title ?? 'Saved lesson') : job.warning ?? (job.error ? `Render failed. ${job.error}` : `Render ${job.state}`));
-      if (job.state === 'ready' || job.state === 'save-error') button('Preview', () => preview(job), row);
+      if (job.state === 'ready' || job.state === 'save-error') {
+        if ((job.size ?? 0) > INLINE_VIDEO_BYTES) {
+          button('Open in video player', () => ctx.call('openVideo', { id: job.id }), row);
+        } else {
+          button('Preview', () => preview(job), row);
+        }
+      }
       if (job.saved) {
         button('Delete saved lesson', async () => {
           await ctx.call('deleteSaved', { id: job.id });
@@ -435,7 +447,7 @@ export const activate: PluginFrontendModule['activate'] = (ctx) => {
     }
 
     async function preview(job: JobView) {
-      if (loading || !job.size || !Number.isSafeInteger(job.size) || job.size <= 0 || job.size > VIDEO_BYTES) return;
+      if (loading || !job.size || !Number.isSafeInteger(job.size) || job.size <= 0 || job.size > INLINE_VIDEO_BYTES) return;
       loading = true;
       try {
         const parts: Uint8Array<ArrayBuffer>[] = [];
