@@ -181,10 +181,15 @@ test('completed lessons reopen after a new backend and disposing temporary jobs 
     const id = await jobs.create(JSON.stringify({ title }), 'silent');
     ids.push(id);
     jobs.start(id);
-    for (let i = 0; i < 100 && !(await jobs.views()).some(j => j.id === id && j.saved); i++) {
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    }
-    assert.ok((await jobs.views()).some(j => j.id === id && j.saved));
+    const deadline = Date.now() + 10_000;
+    let result;
+    do {
+      result = (await jobs.views()).find(job => job.id === id);
+      if (result?.saved) break;
+      assert.ok(!['save-error', 'failed', 'cancelled'].includes(result?.state), result?.warning ?? result?.error);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    } while (Date.now() < deadline);
+    assert.ok(result?.saved, 'Render was not saved within 10 seconds.');
   }
   await jobs.dispose();
   const reopened = new Jobs(folder, runtime, signal);

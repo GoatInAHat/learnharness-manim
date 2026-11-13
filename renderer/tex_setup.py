@@ -57,17 +57,17 @@ def locked_archive(spec, folder, local):
     return path
 
 
-def extract(path, target, base=False):
+def extract(path, target, base_root=None):
     def safe(member, directory):
         name = PurePosixPath(member.name)
-        allowed = ("TinyTeX",) if base else ("tex", "fonts", "source", "hyph-utf8", "bin")
+        allowed = (base_root,) if base_root else ("tex", "fonts", "source", "hyph-utf8", "bin")
         if not name.parts or name.parts[0] not in allowed or ".." in name.parts:
             raise ValueError(f"Unexpected TeX archive path: {member.name}")
         return tarfile.data_filter(member, directory)
 
     with tarfile.open(path, "r:xz") as archive:
         members = (member for member in archive
-                   if base or not member.name.startswith("tlpkg/"))
+                   if base_root or not member.name.startswith("tlpkg/"))
         archive.extractall(target, members=members, filter=safe)
 
 
@@ -143,13 +143,14 @@ def ensure_tex(data, lock, root, key, local):
                 if not managed:
                     raise ValueError("An existing TeX directory could not be verified.")
         base = locked_archive(root, stage, local)
+        base_root = ".TinyTeX" if root["platform"] == "linux-x64" else "TinyTeX"
         if os.name == "nt":
             # The pinned TinyTeX distribution uses the official R installer's SFX flags.
             subprocess.run([base, "-y", f"-o{stage}"], cwd=stage, check=True, timeout=120,
                            stdin=subprocess.DEVNULL, stdout=sys.stderr)
         else:
-            extract(base, stage, base=True)
-        candidate = stage / "TinyTeX"
+            extract(base, stage, base_root)
+        candidate = stage / base_root
         architecture = "dvisvgm." + root["binary"]
         for spec in lock["overlays"]:
             name = spec["name"]
