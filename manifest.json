@@ -2,7 +2,7 @@
   "apiVersion": 1,
   "id": "manim-explainer",
   "name": "Manim Explainer",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "minAppVersion": "0.6.0",
   "description": "Render declarative math lessons as local Manim videos.",
   "main": "main.js",

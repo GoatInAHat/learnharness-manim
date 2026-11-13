@@ -34,7 +34,7 @@ test('standalone package extracts to the LearnHarness plugin layout and activate
   const manifest = JSON.parse(await readFile(join(dist, 'manifest.json'), 'utf8'));
   assert.equal(manifest.id, pluginId);
   assert.equal(manifest.apiVersion, 1);
-  assert.equal(manifest.version, '0.2.0');
+  assert.equal(manifest.version, '0.2.1');
   assert.equal(manifest.minAppVersion, '0.6.0');
   for (const file of [manifest.main, manifest.backend, manifest.styles]) assert.ok(packageFiles.includes(file));
   const main = await readFile(join(dist, manifest.main));

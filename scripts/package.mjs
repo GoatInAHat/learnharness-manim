@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 export const pluginId = 'manim-explainer';
 export const staticFiles = [
-  ...['manifest.json', 'LICENSE', 'NOTICE', 'styles.css'].map((path) => [path, path]),
+  ...['manifest.json', 'LICENSE', 'NOTICE', 'CHANGELOG.md', 'styles.css'].map((path) => [path, path]),
   ['node_modules/typebox/license', 'TYPEBOX-LICENSE'],
   ['runtime/voice/POCKET-TTS-LICENSE', 'POCKET-TTS-LICENSE'],
   ...[

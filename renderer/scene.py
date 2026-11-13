@@ -215,7 +215,7 @@ class LessonScene(Scene):
         items = [self.formulas[display], self.modes[display], self.captions.get(state['caption'])]
         if display != 'function':
             anchor = f"P at {self.plan['variable']} = {state['p'][0]:.8g}"
-            interval = f"h = {state['h']:.4g} · Q distinct" if secant else 'h = 0 · Q = P'
+            interval = f"h = {state['h']:.4g} · Q distinct" if secant else 'Limit: h → 0 · Q → P'
             items.extend([self.readout('anchor', anchor, 3.22, MUTED, 1),
                           self.readout('interval', interval, 2.93, PINK if secant else PAPER, 1)])
         if display in {'secant', 'limit', 'tangent', 'compare'}:
@@ -224,7 +224,8 @@ class LessonScene(Scene):
             slope = f"{kind} ≈ {slope_text(state['slope'])}{unit}"
             items.append(self.readout('slope', slope, 3.16, YELLOW if secant else TEAL, -1))
             if state['reference']:
-                reference = f"B ≈ {slope_text(state['reference'][2])}{unit}"
+                x, _, rate = state['reference']
+                reference = f"{self.plan['function']}′({x:g}) ≈ {slope_text(rate)}{unit}"
                 items.append(self.readout('reference', reference, 2.88, PINK, -1))
         self.hud.submobjects[:] = [obj for obj in items if obj is not None]
 
@@ -232,15 +233,18 @@ class LessonScene(Scene):
         self.slope_line = VMobject(stroke_width=2.5)
         self.reference_line = VMobject(stroke_width=2.5, color=PINK)
         self.base = Dot(radius=0.073, color=PAPER)
-        self.moving = Dot(radius=0.093, color=PINK, fill_opacity=0, stroke_width=1.65)
+        self.moving = Dot(radius=0.073, color=PINK)
         self.reference = Dot(radius=0.073, color=PINK)
         self.base_label = MathTypst('P', font_size=28, color=PAPER)
-        self.moving_label = MathTypst('Q', font_size=28, color=PINK)
+        self.moving_label = label('Q', 24, PINK)
         self.reference_label = MathTypst('B', font_size=28, color=PINK)
-        self.changes = VMobject(stroke_width=1.5, color=PINK)
-        self.interval = MathTypst('h', font_size=24, color=PINK)
+        self.run = VMobject(stroke_width=1.6, color=YELLOW)
+        self.rise = VMobject(stroke_width=1.6, color=PINK)
+        self.interval = MathTypst('h', font_size=24, color=YELLOW)
+        self.delta_time = MathTypst(f'Delta {self.plan["variable"]}', font_size=24, color=YELLOW)
+        self.delta_distance = MathTypst(f'Delta {self.plan["function"]}', font_size=24, color=PINK)
         self.geometry = VGroup()
-        self.content.add(self.slope_line, self.reference_line, self.changes, self.geometry)
+        self.content.add(self.slope_line, self.reference_line, self.run, self.rise, self.geometry)
 
     def draw_frame(self, state: Frame):
         visual = (state['viewport'], state['display'], state['p'], state['q'], state['h'],
@@ -261,17 +265,34 @@ class LessonScene(Scene):
         if display != 'function':
             self.point(self.base, self.base_label, first, -side)
             if secant:
-                self.point(self.moving, self.moving_label, second, side)
+                separation = float(np.linalg.norm(first - second))
+                self.moving.set_opacity(min(1, max(0, (separation - 0.075) / 0.09)))
+                self.moving_label.set_opacity(min(1, max(0, (separation - 0.10) / 0.13)))
+                self.point(self.moving, self.moving_label, second, side, gap=0.24)
         if display in {'difference', 'secant', 'limit'}:
             elbow = np.array([second[0], first[1]])
-            set_segments(self.changes, *clip_segments(np.array([first, elbow]), np.array([elbow, second])))
-            if abs(elbow[0] - first[0]) >= 0.09 and self.inside((first + elbow) / 2):
+            set_segments(self.run, *clip_segments(first[None, :], elbow[None, :]))
+            set_segments(self.rise, *clip_segments(elbow[None, :], second[None, :]))
+            if display == 'difference':
+                run_length = float(np.linalg.norm(elbow - first))
+                rise_length = float(np.linalg.norm(second - elbow))
+                if run_length >= self.delta_time.width + 0.18 and self.inside((first + elbow) / 2):
+                    center = (first + elbow) / 2
+                    center[1] += 0.22 if center[1] < PLOT_MIN[1] + 0.32 else -0.22
+                    self.place_label(self.delta_time, center)
+                    self.geometry.add(self.delta_time)
+                if rise_length >= self.delta_distance.height + 0.18 and self.inside((elbow + second) / 2):
+                    center = (elbow + second) / 2 - side[:2] * (self.delta_distance.width / 2 + 0.12)
+                    self.place_label(self.delta_distance, center)
+                    self.geometry.add(self.delta_distance)
+            elif abs(elbow[0] - first[0]) >= self.interval.width + 0.18 and self.inside((first + elbow) / 2):
                 center = (first + elbow) / 2
                 center[1] += 0.22 if center[1] < PLOT_MIN[1] + 0.32 else -0.22
                 self.place_label(self.interval, center)
                 self.geometry.add(self.interval)
         else:
-            self.changes.clear_points()
+            self.run.clear_points()
+            self.rise.clear_points()
         if display in {'secant', 'limit', 'tangent', 'compare'}:
             self.slope_line.set_color(YELLOW if secant else TEAL)
             self.slope(self.slope_line, *state['p'], state['slope'])
@@ -297,10 +318,10 @@ class LessonScene(Scene):
         padding = np.array([obj.width, obj.height]) / 2 + 0.05
         obj.move_to((*np.clip(center, PLOT_MIN + padding, PLOT_MAX - padding), 0))
 
-    def point(self, dot, label_, point, side):
+    def point(self, dot, label_, point, side, gap=0.08):
         if self.inside(point):
             dot.move_to((*point, 0))
-            center = point + (side * (dot.radius + label_.width / 2 + 0.08) + UP * 0.18)[:2]
+            center = point + (side * (dot.radius + label_.width / 2 + gap) + UP * 0.23)[:2]
             self.place_label(label_, center)
             self.geometry.add(dot, label_)
 
